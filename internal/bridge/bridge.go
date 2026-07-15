@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode"
@@ -14,6 +15,15 @@ import (
 const (
 	maxConfigBytes = 16 << 20
 	maxErrorRunes  = 1024
+	maxErrorBytes  = 4096
+)
+
+var (
+	proxyURI   = regexp.MustCompile(`(?i)\b(?:vless|vmess|trojan|ss|hy2|hysteria2?|tuic)://\S+`)
+	httpURL    = regexp.MustCompile(`(?i)https?://\S+`)
+	jsonSecret = regexp.MustCompile(
+		`(?i)"(?:password|passwd|token|secret|uuid|authorization|hwid|username|user|id)"\s*:\s*"[^"]*"`,
+	)
 )
 
 var lifecycle struct {
@@ -48,9 +58,12 @@ func Start(configJSON string) error {
 		return errors.New("Xray is already running")
 	}
 
-	var config any
+	var config map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return fmt.Errorf("invalid Xray configuration: %w", err)
+	}
+	if config == nil {
+		return errors.New("invalid Xray configuration: root must be an object")
 	}
 
 	payload, err := json.Marshal(map[string]string{"configJSON": configJSON})
@@ -114,6 +127,9 @@ func invoke(request []byte) error {
 
 // SafeError makes the exported error bounded and safe for Java logs/UI.
 func SafeError(value string) string {
+	value = proxyURI.ReplaceAllString(value, "proxy://<redacted>")
+	value = httpURL.ReplaceAllString(value, "https://<redacted>")
+	value = jsonSecret.ReplaceAllString(value, `"credential":"<redacted>"`)
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) && r != '\n' && r != '\t' {
 			return -1
@@ -123,6 +139,9 @@ func SafeError(value string) string {
 	runes := []rune(strings.TrimSpace(value))
 	if len(runes) > maxErrorRunes {
 		runes = runes[:maxErrorRunes]
+	}
+	for len(runes) > 0 && len(string(runes)) > maxErrorBytes {
+		runes = runes[:len(runes)-1]
 	}
 	if len(runes) == 0 {
 		return "unknown Xray error"

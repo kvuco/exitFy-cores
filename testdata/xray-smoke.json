@@ -1,0 +1,14 @@
+{
+  "log": {"loglevel": "none"},
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 39081,
+      "protocol": "socks",
+      "settings": {"auth": "noauth", "udp": false}
+    }
+  ],
+  "outbounds": [
+    {"tag": "smoke", "protocol": "blackhole"}
+  ]
+}

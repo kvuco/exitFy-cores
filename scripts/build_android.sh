@@ -6,10 +6,13 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
-: "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME must point to an Android NDK}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ndk_env.sh
+source "$script_dir/ndk_env.sh"
 
 output_dir="$1"
-toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+ndk_home="$(exitfy_find_ndk)"
+toolchain="$(exitfy_ndk_toolchain "$ndk_home")"
 mkdir -p "$output_dir"
 
 build_one() {
@@ -18,17 +21,19 @@ build_one() {
   local cc="$3"
   local goarm="${4:-}"
   local output="$output_dir/libxray-$abi.so"
+  local compiler
+  compiler="$(exitfy_find_tool "$toolchain" "$cc")"
 
   echo "building $abi"
   if [[ -n "$goarm" ]]; then
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM="$goarm" \
-      CC="$toolchain/$cc" \
+      CC="$compiler" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
         -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
         -o "$output" ./cmd/exitfy-xray
   else
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" \
-      CC="$toolchain/$cc" \
+      CC="$compiler" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
         -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
         -o "$output" ./cmd/exitfy-xray

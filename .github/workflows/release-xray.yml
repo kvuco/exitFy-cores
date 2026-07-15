@@ -4,19 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild the latest stable libXray release
+        description: Rebuild and verify the latest stable libXray release
         type: boolean
         default: false
   schedule:
     - cron: "23 4 * * *"
   push:
     branches: [main]
-    paths:
-      - "cmd/**"
-      - "internal/**"
-      - "scripts/**"
-      - "go.mod"
-      - ".github/workflows/release-xray.yml"
 
 permissions:
   contents: write
@@ -36,19 +30,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Audit public repository contents
+        run: ./scripts/audit_public_tree.py
+
       - name: Resolve latest stable libXray
         id: upstream
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh api 'repos/XTLS/libXray/releases/latest')"
-          upstream_tag="$(jq -r '.tag_name' <<<"$release_json")"
-          draft="$(jq -r '.draft' <<<"$release_json")"
-          prerelease="$(jq -r '.prerelease' <<<"$release_json")"
-          if [[ "$draft" != false || "$prerelease" != false ]]; then
-            echo "GitHub latest release is not stable" >&2
+          release_json="$(gh api 'repos/XTLS/libXray/releases?per_page=50' \
+            | jq -c 'map(select(.draft == false and .prerelease == false))[0]')"
+          if [[ -z "$release_json" || "$release_json" == null ]]; then
+            echo "No stable libXray release found" >&2
             exit 1
           fi
+          upstream_tag="$(jq -r '.tag_name' <<<"$release_json")"
           if [[ ! "$upstream_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
             echo "Unsupported libXray tag: $upstream_tag" >&2
             exit 1
@@ -60,13 +56,21 @@ jobs:
           printf -v day_padded '%02d' "$((10#$day))"
           module_version="v1.${year}${month_padded}${day_padded}.0"
           upstream_commit="$(gh api "repos/XTLS/libXray/commits/$upstream_tag" --jq '.sha')"
-          upstream_go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_tag" --jq '.content' | base64 --decode)"
+          upstream_go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_tag" \
+            --jq '.content' | base64 --decode)"
           go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$upstream_go_mod")"
-          release_tag="xray-$upstream_tag"
-          needed=true
-          if gh release view "$release_tag" >/dev/null 2>&1 \
-              && [[ "${{ inputs.force || false }}" != true ]]; then
-            needed=false
+          release_tag="xray-$upstream_tag-w1"
+          release_exists=false
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+          force="${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}"
+          build_needed=false
+          head_subject="$(git log -1 --pretty=%s)"
+          if [[ "$force" == true || "$release_exists" == false ]]; then
+            build_needed=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$head_subject" != "Pin libXray "* ]]; then
+            build_needed=true
           fi
           {
             echo "tag=$upstream_tag"
@@ -74,26 +78,27 @@ jobs:
             echo "module_version=$module_version"
             echo "go_version=$go_version"
             echo "release_tag=$release_tag"
-            echo "needed=$needed"
+            echo "build_needed=$build_needed"
+            echo "publish_needed=$([[ "$release_exists" == false ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        if: steps.upstream.outputs.needed == 'true'
+        if: steps.upstream.outputs.build_needed == 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ steps.upstream.outputs.go_version }}
           cache: true
 
       - name: Set up Android SDK
-        if: steps.upstream.outputs.needed == 'true'
+        if: steps.upstream.outputs.build_needed == 'true'
         uses: android-actions/setup-android@v3
 
       - name: Install Android NDK
-        if: steps.upstream.outputs.needed == 'true'
+        if: steps.upstream.outputs.build_needed == 'true'
         run: sdkmanager "ndk;$NDK_VERSION"
 
-      - name: Pin libXray and test adapter
-        if: steps.upstream.outputs.needed == 'true'
+      - name: Pin libXray and test adapter lifecycle
+        if: steps.upstream.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
           go get "github.com/xtls/libxray@${{ steps.upstream.outputs.module_version }}"
@@ -101,7 +106,7 @@ jobs:
           go test ./...
 
       - name: Build four Android ABIs twice
-        if: steps.upstream.outputs.needed == 'true'
+        if: steps.upstream.outputs.build_needed == 'true'
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
@@ -114,8 +119,27 @@ jobs:
             cmp "$artifact" "dist-repro/${artifact#dist/}"
           done
 
+      - name: Enable KVM
+        if: steps.upstream.outputs.build_needed == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke-test real Xray on Android API 26
+        if: steps.upstream.outputs.build_needed == 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 26
+          target: default
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
+
       - name: Record exact upstream pin
-        if: steps.upstream.outputs.needed == 'true'
+        if: steps.upstream.outputs.build_needed == 'true'
         id: wrapper
         run: |
           set -euo pipefail
@@ -124,22 +148,30 @@ jobs:
           git add go.mod go.sum
           if ! git diff --cached --quiet; then
             git commit -m "Pin libXray ${{ steps.upstream.outputs.tag }}"
+            ./scripts/audit_public_tree.py
             git push origin HEAD:main
           fi
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Generate manifest
-        if: steps.upstream.outputs.needed == 'true'
+      - name: Generate and verify schema 2 manifest
+        if: steps.upstream.outputs.build_needed == 'true'
         run: |
+          set -euo pipefail
           ./scripts/generate_manifest.py \
             --directory dist \
             --upstream-tag "${{ steps.upstream.outputs.tag }}" \
             --upstream-commit "${{ steps.upstream.outputs.commit }}" \
             --wrapper-commit "${{ steps.wrapper.outputs.commit }}" \
+            --release-tag "${{ steps.upstream.outputs.release_tag }}" \
             --output dist/manifest.json
+          ./scripts/verify_manifest.py dist/manifest.json dist
 
-      - name: Publish release
-        if: steps.upstream.outputs.needed == 'true'
+      - name: Re-audit before publication
+        if: steps.upstream.outputs.publish_needed == 'true'
+        run: ./scripts/audit_public_tree.py
+
+      - name: Publish stable contract release
+        if: steps.upstream.outputs.publish_needed == 'true'
         run: |
           gh release create "${{ steps.upstream.outputs.release_tag }}" \
             dist/libxray-arm64-v8a.so \
@@ -147,6 +179,5 @@ jobs:
             dist/libxray-x86.so \
             dist/libxray-x86_64.so \
             dist/manifest.json \
-            --title "Xray ${{ steps.upstream.outputs.tag }}" \
-            --notes "Built from XTLS/libXray ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.commit }}) for Android API 26+."
-
+            --title "Xray ${{ steps.upstream.outputs.tag }} · contract 1" \
+            --notes "Built from XTLS/libXray ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.commit }}) for Android API 26+. Manifest schema 2, core API 1, config contract 1."

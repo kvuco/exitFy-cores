@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from verify_artifacts import ABI_LAYOUT, REQUIRED_EXPORTS, inspect_elf, verify
@@ -23,8 +24,20 @@ def main() -> None:
     parser.add_argument("--upstream-tag", required=True)
     parser.add_argument("--upstream-commit", required=True)
     parser.add_argument("--wrapper-commit", required=True)
+    parser.add_argument("--release-tag", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.upstream_tag):
+        raise ValueError("invalid upstream tag")
+    if args.release_tag != f"xray-{args.upstream_tag}-w1":
+        raise ValueError("release tag does not match config contract 1")
+    for label, value in (
+        ("upstream", args.upstream_commit),
+        ("wrapper", args.wrapper_commit),
+    ):
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError(f"invalid {label} commit")
 
     verify(args.directory)
     assets = {}
@@ -36,13 +49,17 @@ def main() -> None:
             "size": path.stat().st_size,
             "sha256": sha256(path),
             "elfClass": 64 if info.elf_class == 2 else 32,
-            "elfMachine": info.machine_name,
+            "elfMachine": info.machine,
+            "elfMachineName": info.machine_name,
             "exports": sorted(REQUIRED_EXPORTS),
         }
 
     manifest = {
-        "schema": 1,
+        "schema": 2,
+        "coreApi": 1,
+        "configContract": 1,
         "family": "xray",
+        "releaseTag": args.release_tag,
         "upstream": {
             "repository": "XTLS/libXray",
             "tag": args.upstream_tag,
@@ -64,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
