@@ -24,12 +24,14 @@ build_one() {
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM="$goarm" \
       CC="$toolchain/$cc" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
-        -ldflags="-s -w -buildid=" -o "$output" ./cmd/exitfy-xray
+        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
+        -o "$output" ./cmd/exitfy-xray
   else
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" \
       CC="$toolchain/$cc" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
-        -ldflags="-s -w -buildid=" -o "$output" ./cmd/exitfy-xray
+        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
+        -o "$output" ./cmd/exitfy-xray
   fi
 }
 
@@ -37,4 +39,3 @@ build_one arm64-v8a arm64 aarch64-linux-android26-clang
 build_one armeabi-v7a arm armv7a-linux-androideabi26-clang 7
 build_one x86 386 i686-linux-android26-clang
 build_one x86_64 amd64 x86_64-linux-android26-clang
-
