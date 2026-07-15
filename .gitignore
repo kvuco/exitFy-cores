@@ -1,0 +1,5 @@
+dist/
+dist-repro/
+*.h
+__pycache__/
+.DS_Store
