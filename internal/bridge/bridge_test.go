@@ -78,6 +78,56 @@ func TestSafeErrorBoundsAndStripsControls(t *testing.T) {
 	if strings.Contains(secret, "uuid@example") || strings.Contains(secret, "do-not-log") {
 		t.Fatalf("credential survived sanitization: %s", secret)
 	}
+	escaped := SafeError(`{"password":"prefix\\\"still-secret suffix"}`)
+	if strings.Contains(escaped, "still-secret") || strings.Contains(escaped, "suffix") {
+		t.Fatalf("escaped JSON credential survived sanitization: %s", escaped)
+	}
+}
+
+func TestFailedStartResponseRequiresSerializedStopBeforeRetry(t *testing.T) {
+	lifecycle.Lock()
+	lifecycle.running = false
+	lifecycle.stopRequired = false
+	lifecycle.Unlock()
+	originalInvoke := invokeLibXray
+	defer func() {
+		invokeLibXray = originalInvoke
+		lifecycle.Lock()
+		lifecycle.running = false
+		lifecycle.stopRequired = false
+		lifecycle.Unlock()
+	}()
+
+	stopCalls := 0
+	invokeLibXray = func(request string) string {
+		var envelope struct {
+			APIVersion int    `json:"apiVersion"`
+			Method     string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(request), &envelope); err != nil {
+			t.Fatalf("invalid invoke envelope: %v", err)
+		}
+		if envelope.APIVersion != 1 {
+			t.Fatalf("unexpected libXray API version: %d", envelope.APIVersion)
+		}
+		if strings.Contains(request, `"method":"stopXray"`) {
+			stopCalls++
+			return `{"success":true,"error":""}`
+		}
+		return `{"success":false,"error":"uncertain start"}`
+	}
+	if err := Start(`{"log":{"loglevel":"none"}}`); err == nil {
+		t.Fatal("failed libXray response was accepted")
+	}
+	if err := Start(`{"log":{"loglevel":"none"}}`); err == nil {
+		t.Fatal("retry was accepted before serialized stop")
+	}
+	if err := Stop(); err != nil {
+		t.Fatalf("cleanup stop: %v", err)
+	}
+	if stopCalls != 1 {
+		t.Fatalf("expected one stopXray cleanup, got %d", stopCalls)
+	}
 }
 
 func freePort(t *testing.T) int {

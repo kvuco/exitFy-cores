@@ -49,12 +49,6 @@ jobs:
             echo "Unsupported libXray tag: $upstream_tag" >&2
             exit 1
           fi
-          year="${BASH_REMATCH[1]}"
-          month="${BASH_REMATCH[2]}"
-          day="${BASH_REMATCH[3]}"
-          printf -v month_padded '%02d' "$((10#$month))"
-          printf -v day_padded '%02d' "$((10#$day))"
-          module_version="v1.${year}${month_padded}${day_padded}.0"
           upstream_commit="$(gh api "repos/XTLS/libXray/commits/$upstream_tag" --jq '.sha')"
           upstream_go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_tag" \
             --jq '.content' | base64 --decode)"
@@ -75,7 +69,6 @@ jobs:
           {
             echo "tag=$upstream_tag"
             echo "commit=$upstream_commit"
-            echo "module_version=$module_version"
             echo "go_version=$go_version"
             echo "release_tag=$release_tag"
             echo "build_needed=$build_needed"
@@ -101,7 +94,10 @@ jobs:
         if: steps.upstream.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
-          go get "github.com/xtls/libxray@${{ steps.upstream.outputs.module_version }}"
+          # Build the exact commit recorded in manifest.json. Deriving a Go
+          # module version from the release date could otherwise select a
+          # different revision while still claiming the release-tag commit.
+          go get "github.com/xtls/libxray@${{ steps.upstream.outputs.commit }}"
           go mod tidy
           go test ./...
 

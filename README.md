@@ -1,12 +1,15 @@
 # exitFy cores
 
-Reproducible Android core builds used by exitFy. This repository does not use
-the historical libvless.so or its source.
+Reproducible Android core builds used by exitFy. The repository builds both
+Xray and the exitFy SB core from pinned official upstream source. It does not
+use the historical third-party `libvless.so` or its source.
 
 The current release workflow follows the latest stable XTLS/libXray release,
-pins both its tag and commit, runs adapter lifecycle tests, builds four Android
+builds the exact commit referenced by its tag, records both pins, runs adapter
+lifecycle tests, builds four Android
 ABIs at API 26, checks reproducibility, verifies ELF metadata and required
-exports, performs a real start/stop on an Android API 26 x86_64 emulator, and
+exports, requires 16 KiB-compatible `PT_LOAD` alignment, performs a real
+start/stop on an Android API 26 x86_64 emulator, and
 publishes:
 
 - libxray-arm64-v8a.so
@@ -17,6 +20,21 @@ publishes:
 
 `manifest.json` uses schema 2 with `coreApi: 1` and `configContract: 1`.
 Stable release names end in `-w1`, for example `xray-v26.7.11-w1`.
+
+The independent SB workflow tracks only stable SagerNet upstream releases and
+uses a separate Go module so its dependency graph cannot change the libXray
+build. It enables only the features used by exitFy: QUIC-based outbounds and
+uTLS/Reality. It publishes:
+
+- `libexitfy-sb-arm64-v8a.so`
+- `libexitfy-sb-armeabi-v7a.so`
+- `libexitfy-sb-x86.so`
+- `libexitfy-sb-x86_64.so`
+- `manifest.json`
+- a reproducible corresponding-source bundle
+
+SB release names use `sb-v<upstream>-w1`. These builds are not affiliated
+with or endorsed by SagerNet.
 
 The exported ABI is deliberately small:
 
@@ -39,6 +57,14 @@ installed NDK, then run:
     ./scripts/build_android.sh dist
     ./scripts/verify_artifacts.py dist
 
+For the separate SB module, use the Go version declared in `singbox/go.mod`:
+
+    (cd singbox && go test -tags 'with_quic,with_utls,badlinkname,tfogo_checklinkname0' ./...)
+    ./scripts/build_singbox_android.sh dist
+    ./scripts/verify_singbox_artifacts.py dist
+    ./scripts/build_singbox_source_bundle.py --upstream-version v1.13.14 \
+      --output dist/exitfy-sb-v1.13.14-source.tar.gz
+
 With a matching Android device or emulator connected, run:
 
     ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
@@ -51,4 +77,6 @@ home paths, and unapproved binaries before repository pushes or releases.
 
 Xray is built through the official XTLS/libXray module, which embeds the
 compatible XTLS/Xray-core revision selected by that release. See
-THIRD_PARTY.md for licensing.
+`THIRD_PARTY.md` for licensing. The combined SB shared libraries are
+GPL-3.0-or-later; the complete license text is in `singbox/COPYING` and every
+release includes corresponding source.

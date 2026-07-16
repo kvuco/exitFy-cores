@@ -1,0 +1,16 @@
+{
+  "log": {"level": "panic"},
+  "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": 0}],
+  "outbounds": [{
+    "type": "tuic",
+    "tag": "proxy",
+    "server": "127.0.0.1",
+    "server_port": 443,
+    "uuid": "33333333-3333-4333-8333-333333333333",
+    "password": "fixture-password",
+    "congestion_control": "bbr",
+    "udp_relay_mode": "native",
+    "tls": {"enabled": true, "server_name": "example.com", "insecure": true, "alpn": ["h3"]}
+  }],
+  "route": {"final": "proxy"}
+}

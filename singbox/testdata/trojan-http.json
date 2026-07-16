@@ -1,0 +1,14 @@
+{
+  "log": {"level": "panic"},
+  "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": 0}],
+  "outbounds": [{
+    "type": "trojan",
+    "tag": "proxy",
+    "server": "127.0.0.1",
+    "server_port": 443,
+    "password": "fixture-password",
+    "tls": {"enabled": true, "server_name": "example.com"},
+    "transport": {"type": "http", "path": "/exitfy", "host": ["example.com"]}
+  }],
+  "route": {"final": "proxy"}
+}

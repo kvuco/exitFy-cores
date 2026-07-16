@@ -22,18 +22,21 @@ var (
 	proxyURI   = regexp.MustCompile(`(?i)\b(?:vless|vmess|trojan|ss|hy2|hysteria2?|tuic)://\S+`)
 	httpURL    = regexp.MustCompile(`(?i)https?://\S+`)
 	jsonSecret = regexp.MustCompile(
-		`(?i)"(?:password|passwd|token|secret|uuid|authorization|hwid|username|user|id)"\s*:\s*"[^"]*"`,
+		`(?i)"(?:password|passwd|token|secret|uuid|authorization|hwid|username|user|id)"\s*:\s*"(?:\\.|[^"\\])*"`,
 	)
+	invokeLibXray = libxray.Invoke
 )
 
 var lifecycle struct {
 	sync.Mutex
-	running bool
+	running      bool
+	stopRequired bool
 }
 
 type invokeRequest struct {
-	Method  string          `json:"method"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	APIVersion int             `json:"apiVersion"`
+	Method     string          `json:"method"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 type invokeResponse struct {
@@ -54,8 +57,8 @@ func Start(configJSON string) error {
 	if len(configJSON) > maxConfigBytes {
 		return fmt.Errorf("Xray configuration exceeds %d bytes", maxConfigBytes)
 	}
-	if lifecycle.running {
-		return errors.New("Xray is already running")
+	if lifecycle.running || lifecycle.stopRequired {
+		return errors.New("Xray is already running or requires StopCore")
 	}
 
 	var config map[string]json.RawMessage
@@ -71,13 +74,19 @@ func Start(configJSON string) error {
 		return fmt.Errorf("encode Xray request: %w", err)
 	}
 	request, err := json.Marshal(invokeRequest{
-		Method:  "runXrayFromJson",
-		Payload: payload,
+		APIVersion: 1,
+		Method:     "runXrayFromJson",
+		Payload:    payload,
 	})
 	if err != nil {
 		return fmt.Errorf("encode Xray request: %w", err)
 	}
 
+	// Once libXray has received a start request, an invalid/truncated response
+	// cannot prove that the process-global runtime stayed stopped. Keep the
+	// adapter in a stop-required state so JNI's serialized cleanup always
+	// reaches stopXray and a retry cannot create two instances.
+	lifecycle.stopRequired = true
 	if err := invoke(request); err != nil {
 		return err
 	}
@@ -90,10 +99,10 @@ func Stop() error {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 
-	if !lifecycle.running {
+	if !lifecycle.running && !lifecycle.stopRequired {
 		return nil
 	}
-	request, err := json.Marshal(invokeRequest{Method: "stopXray"})
+	request, err := json.Marshal(invokeRequest{APIVersion: 1, Method: "stopXray"})
 	if err != nil {
 		return fmt.Errorf("encode Xray stop request: %w", err)
 	}
@@ -101,6 +110,7 @@ func Stop() error {
 		return err
 	}
 	lifecycle.running = false
+	lifecycle.stopRequired = false
 	return nil
 }
 
@@ -111,7 +121,7 @@ func IsRunning() bool {
 }
 
 func invoke(request []byte) error {
-	raw := libxray.Invoke(string(request))
+	raw := invokeLibXray(string(request))
 	var response invokeResponse
 	if err := json.Unmarshal([]byte(raw), &response); err != nil {
 		return fmt.Errorf("invalid libXray response: %w", err)

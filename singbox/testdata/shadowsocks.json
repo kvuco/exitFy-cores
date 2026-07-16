@@ -1,0 +1,13 @@
+{
+  "log": {"level": "panic"},
+  "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": 0}],
+  "outbounds": [{
+    "type": "shadowsocks",
+    "tag": "proxy",
+    "server": "127.0.0.1",
+    "server_port": 8388,
+    "method": "aes-128-gcm",
+    "password": "fixture-password"
+  }],
+  "route": {"final": "proxy"}
+}

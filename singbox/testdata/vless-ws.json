@@ -1,0 +1,14 @@
+{
+  "log": {"level": "panic"},
+  "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": 0}],
+  "outbounds": [{
+    "type": "vless",
+    "tag": "proxy",
+    "server": "127.0.0.1",
+    "server_port": 443,
+    "uuid": "11111111-1111-4111-8111-111111111111",
+    "tls": {"enabled": true, "server_name": "example.com"},
+    "transport": {"type": "ws", "path": "/exitfy", "headers": {"Host": "example.com"}}
+  }],
+  "route": {"final": "proxy"}
+}

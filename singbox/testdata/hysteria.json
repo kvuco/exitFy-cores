@@ -1,0 +1,15 @@
+{
+  "log": {"level": "panic"},
+  "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": 0}],
+  "outbounds": [{
+    "type": "hysteria",
+    "tag": "proxy",
+    "server": "127.0.0.1",
+    "server_port": 443,
+    "auth_str": "fixture-auth",
+    "up_mbps": 10,
+    "down_mbps": 10,
+    "tls": {"enabled": true, "server_name": "example.com", "insecure": true}
+  }],
+  "route": {"final": "proxy"}
+}
