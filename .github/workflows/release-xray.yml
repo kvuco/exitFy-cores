@@ -233,9 +233,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
-            echo "main advanced after the read-only build; refusing to publish stale assets" >&2
-            exit 1
+          head="$(git rev-parse HEAD)"
+          if [[ "$head" != "$GITHUB_SHA" ]]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" "$head" || {
+              echo "main no longer descends from the read-only build" >&2
+              exit 1
+            }
+            while IFS= read -r changed; do
+              case "$changed" in
+                singbox/go.mod|singbox/go.sum) ;;
+                *)
+                  echo "main changed outside the sing-box pin: $changed" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(git diff --name-only "$GITHUB_SHA" "$head")
           fi
           cp "$RUNNER_TEMP/candidate/pins/go.mod" go.mod
           cp "$RUNNER_TEMP/candidate/pins/go.sum" go.sum
