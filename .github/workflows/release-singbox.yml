@@ -84,7 +84,7 @@ jobs:
             "$RUNNER_TEMP/core-releases.json"
           prefix="sb-$upstream_tag-w"
           max_revision="$(jq -r --arg prefix "$prefix" '
-            [ .[] | .tag_name
+            [ .[] | select(.draft == false) | .tag_name
               | select(startswith($prefix))
               | try (capture("-w(?<n>[0-9]+)$").n | tonumber) catch empty ]
             | max // 1
@@ -323,18 +323,33 @@ jobs:
           set -euo pipefail
           candidate="$RUNNER_TEMP/candidate"
           source_name="exitfy-sb-$UPSTREAM_TAG-source.tar.gz"
-          gh release create "$RELEASE_TAG" --draft \
-            --title "exitFy SB core $UPSTREAM_VERSION · core ABI 2" \
-            --notes "Independent exitFy build based on SagerNet $UPSTREAM_TAG ($UPSTREAM_COMMIT). Not affiliated with or endorsed by SagerNet. Android API 26+, core API 2, config contract 1, GPL-3.0-or-later; corresponding source is attached."
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-before.json"
+          draft_count="$(jq -r --arg tag "$RELEASE_TAG" \
+            '[.[] | select(.tag_name == $tag and .draft == true)] | length' \
+            "$RUNNER_TEMP/releases-before.json")"
+          published_count="$(jq -r --arg tag "$RELEASE_TAG" \
+            '[.[] | select(.tag_name == $tag and .draft == false)] | length' \
+            "$RUNNER_TEMP/releases-before.json")"
+          [[ "$published_count" == 0 && "$draft_count" -le 1 ]]
+          if [[ "$draft_count" == 0 ]]; then
+            gh release create "$RELEASE_TAG" --draft \
+              --title "exitFy SB core $UPSTREAM_VERSION · core ABI 2" \
+              --notes "Independent exitFy build based on SagerNet $UPSTREAM_TAG ($UPSTREAM_COMMIT). Not affiliated with or endorsed by SagerNet. Android API 26+, core API 2, config contract 1, GPL-3.0-or-later; corresponding source is attached."
+          fi
           gh release upload "$RELEASE_TAG" \
             "$candidate/libexitfy-sb-arm64-v8a.so" \
             "$candidate/libexitfy-sb-armeabi-v7a.so" \
             "$candidate/libexitfy-sb-x86.so" \
             "$candidate/libexitfy-sb-x86_64.so" \
             "$candidate/manifest.json" \
-            "$candidate/$source_name"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-            > "$RUNNER_TEMP/draft.json"
+            "$candidate/$source_name" --clobber
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq --arg tag "$RELEASE_TAG" \
+              '[.[] | select(.tag_name == $tag and .draft == true)]
+               | if length == 1 then .[0] else error("verified draft is not unique") end' \
+              > "$RUNNER_TEMP/draft.json"
+          draft_id="$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
           expected="$source_name,libexitfy-sb-arm64-v8a.so,libexitfy-sb-armeabi-v7a.so,libexitfy-sb-x86.so,libexitfy-sb-x86_64.so,manifest.json"
           actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
           [[ "$actual" == "$expected" ]]
@@ -342,4 +357,8 @@ jobs:
             local_digest="sha256:$(sha256sum "$candidate/$name" | awk '{print $1}')"
             [[ "$digest" == "$local_digest" ]]
           done < <(jq -r '.assets[] | [.name, .digest] | @tsv' "$RUNNER_TEMP/draft.json")
-          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
+            -F draft=false -f make_latest=false \
+            | jq -e --arg tag "$RELEASE_TAG" \
+              '.tag_name == $tag and .draft == false' >/dev/null
