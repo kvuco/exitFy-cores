@@ -26,6 +26,8 @@ avd_name="exitfy-api26-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
 serial="emulator-5554"
 temporary="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/$avd_name"
 mkdir -p "$temporary"
+export ANDROID_AVD_HOME="$temporary/avd"
+mkdir -p "$ANDROID_AVD_HOME"
 
 cleanup() {
   "$adb_bin" -s "$serial" emu kill >/dev/null 2>&1 || true
@@ -33,7 +35,7 @@ cleanup() {
     kill "$emulator_pid" >/dev/null 2>&1 || true
     wait "$emulator_pid" >/dev/null 2>&1 || true
   fi
-  rm -rf "$HOME/.android/avd/$avd_name.avd" "$HOME/.android/avd/$avd_name.ini"
+  rm -rf "$ANDROID_AVD_HOME"
 }
 trap cleanup EXIT
 
