@@ -56,9 +56,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api --paginate --slurp \
-            'repos/SagerNet/sing-box/releases?per_page=100' \
-            | jq 'add' > "$RUNNER_TEMP/upstream-releases.json"
+          ./scripts/fetch_github_release_pages.sh SagerNet/sing-box \
+            "$RUNNER_TEMP/upstream-releases.json"
           upstream="$(jq -c '
             [ .[] | select(.draft == false and .prerelease == false)
               | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
@@ -81,9 +80,8 @@ jobs:
             exit 1
           fi
 
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            | jq 'add' > "$RUNNER_TEMP/core-releases.json"
+          ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/core-releases.json"
           prefix="sb-$upstream_tag-w"
           max_revision="$(jq -r --arg prefix "$prefix" '
             [ .[] | .tag_name
