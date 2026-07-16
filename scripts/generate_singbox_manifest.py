@@ -37,8 +37,11 @@ def main() -> None:
 
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.upstream_tag):
         raise ValueError("invalid upstream tag")
-    if args.release_tag != f"sb-{args.upstream_tag}-w1":
-        raise ValueError("release tag does not match config contract 1")
+    release_match = re.fullmatch(
+        rf"sb-{re.escape(args.upstream_tag)}-w([1-9][0-9]*)", args.release_tag
+    )
+    if release_match is None or int(release_match.group(1)) < 2:
+        raise ValueError("ABI 2 release tag must use wrapper revision w2 or newer")
     if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", args.go_version):
         raise ValueError("invalid upstream Go version")
     for label, value in (
@@ -67,7 +70,7 @@ def main() -> None:
 
     manifest = {
         "schema": 2,
-        "coreApi": 1,
+        "coreApi": 2,
         "configContract": 1,
         "family": "sing_box",
         "releaseTag": args.release_tag,

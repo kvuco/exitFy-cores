@@ -1,0 +1,7 @@
+{
+  global:
+    StartCore;
+    StopCore;
+  local:
+    *;
+};

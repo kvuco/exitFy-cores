@@ -115,8 +115,8 @@ func Start(configJSON string) (err error) {
 	return nil
 }
 
-// Stop is synchronized and idempotent. Close errors are returned to tests but
-// the fixed C ABI intentionally keeps StopCore void.
+// Stop is synchronized and idempotent. ABI 2 returns a sanitized Close error
+// to the Java/JNI caller instead of silently losing it.
 func Stop() (err error) {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()

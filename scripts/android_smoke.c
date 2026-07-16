@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 typedef char *(*start_core_fn)(const char *);
-typedef void (*stop_core_fn)(void);
+typedef char *(*stop_core_fn)(void);
 
 static char *read_config(const char *path) {
     FILE *source = fopen(path, "rb");
@@ -65,8 +65,18 @@ int main(int argc, char **argv) {
         return 6;
     }
     usleep(250000U);
-    stop();
-    stop();
+    error = stop();
+    if (error != NULL) {
+        fprintf(stderr, "StopCore failed: %s\n", error);
+        free(error);
+        return 7;
+    }
+    error = stop();
+    if (error != NULL) {
+        fprintf(stderr, "repeated StopCore failed: %s\n", error);
+        free(error);
+        return 8;
+    }
     puts("Android StartCore/StopCore smoke test passed");
     return 0;
 }

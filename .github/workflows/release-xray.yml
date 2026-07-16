@@ -4,105 +4,155 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild and verify the latest stable libXray release
+        description: Build a new wrapper revision even when the current one is complete
         type: boolean
         default: false
   schedule:
     - cron: "23 4 * * *"
   push:
     branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "testdata/**"
+      - "scripts/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/release-xray.yml"
+      - "README.md"
+      - "THIRD_PARTY.md"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: xray-release
+  group: xray-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      build_needed: ${{ steps.resolve.outputs.build_needed }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      go_version: ${{ steps.resolve.outputs.go_version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
     env:
       GH_TOKEN: ${{ github.token }}
       NDK_VERSION: 27.2.12479018
+      FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Audit public repository contents
         run: ./scripts/audit_public_tree.py
 
-      - name: Resolve latest stable libXray
-        id: upstream
+      - name: Resolve stable upstream and wrapper revision
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh api 'repos/XTLS/libXray/releases?per_page=50' \
-            | jq -c 'map(select(.draft == false and .prerelease == false))[0]')"
-          if [[ -z "$release_json" || "$release_json" == null ]]; then
+          gh api --paginate --slurp \
+            'repos/XTLS/libXray/releases?per_page=100' \
+            | jq 'add' > "$RUNNER_TEMP/upstream-releases.json"
+          upstream="$(jq -c '
+            [ .[] | select(.draft == false and .prerelease == false)
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | (.tag_name | capture("^v(?<a>[0-9]+)\\.(?<b>[0-9]+)\\.(?<c>[0-9]+)$")
+                 | [(.a|tonumber),(.b|tonumber),(.c|tonumber)]) as $parts
+              | . + {parts:$parts} ] | sort_by(.parts) | last
+          ' "$RUNNER_TEMP/upstream-releases.json")"
+          if [[ -z "$upstream" || "$upstream" == null ]]; then
             echo "No stable libXray release found" >&2
             exit 1
           fi
-          upstream_tag="$(jq -r '.tag_name' <<<"$release_json")"
-          if [[ ! "$upstream_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Unsupported libXray tag: $upstream_tag" >&2
+          upstream_tag="$(jq -r '.tag_name' <<<"$upstream")"
+          upstream_commit="$(gh api "repos/XTLS/libXray/commits/$upstream_tag" --jq .sha)"
+          go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_tag" \
+            --jq .content | base64 --decode)"
+          go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$go_mod")"
+          if [[ ! "$go_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Unsupported Go version: $go_version" >&2
             exit 1
           fi
-          upstream_commit="$(gh api "repos/XTLS/libXray/commits/$upstream_tag" --jq '.sha')"
-          upstream_go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_tag" \
-            --jq '.content' | base64 --decode)"
-          go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$upstream_go_mod")"
-          release_tag="xray-$upstream_tag-w1"
-          release_exists=false
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            release_exists=true
+
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq 'add' > "$RUNNER_TEMP/core-releases.json"
+          prefix="xray-$upstream_tag-w"
+          max_revision="$(jq -r --arg prefix "$prefix" '
+            [ .[] | .tag_name
+              | select(startswith($prefix))
+              | try (capture("-w(?<n>[0-9]+)$").n | tonumber) catch empty ]
+            | max // 1
+          ' "$RUNNER_TEMP/core-releases.json")"
+          expected_assets="libxray-arm64-v8a.so,libxray-armeabi-v7a.so,libxray-x86.so,libxray-x86_64.so,manifest.json"
+          current=false
+          while IFS=$'\t' read -r tag assets manifest_id; do
+            [[ "$assets" == "$expected_assets" && -n "$manifest_id" ]] || continue
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$manifest_id" \
+              > "$RUNNER_TEMP/current-manifest.json"
+            if jq -e --arg upstream "$upstream_commit" --arg wrapper "$GITHUB_SHA" '
+              .schema == 2 and .coreApi == 2 and .configContract == 1
+              and .family == "xray" and .upstream.commit == $upstream
+              and .wrapper.commit == $wrapper
+            ' "$RUNNER_TEMP/current-manifest.json" >/dev/null; then
+              current=true
+              break
+            fi
+          done < <(jq -r --arg prefix "$prefix" '
+            .[] | select(.draft == false and .prerelease == false)
+            | select(.tag_name | startswith($prefix))
+            | [ .tag_name, ([.assets[].name] | sort | join(",")),
+                ([.assets[] | select(.name == "manifest.json") | .id][0] // "") ]
+            | @tsv
+          ' "$RUNNER_TEMP/core-releases.json")
+
+          build_needed=true
+          if [[ "$current" == true && "$FORCE_REBUILD" != true ]]; then
+            build_needed=false
           fi
-          force="${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}"
-          build_needed=false
-          head_subject="$(git log -1 --pretty=%s)"
-          if [[ "$force" == true || "$release_exists" == false ]]; then
-            build_needed=true
-          elif [[ "$GITHUB_EVENT_NAME" == push && "$head_subject" != "Pin libXray "* ]]; then
-            build_needed=true
-          fi
+          revision=$((max_revision + 1))
+          release_tag="xray-$upstream_tag-w$revision"
           {
-            echo "tag=$upstream_tag"
-            echo "commit=$upstream_commit"
+            echo "build_needed=$build_needed"
+            echo "upstream_tag=$upstream_tag"
+            echo "upstream_commit=$upstream_commit"
             echo "go_version=$go_version"
             echo "release_tag=$release_tag"
-            echo "build_needed=$build_needed"
-            echo "publish_needed=$([[ "$release_exists" == false ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: actions/setup-go@v6
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: ${{ steps.upstream.outputs.go_version }}
+          go-version: ${{ steps.resolve.outputs.go_version }}
           cache: true
 
       - name: Set up Android SDK
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: android-actions/setup-android@v3
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
       - name: Install Android NDK
-        if: steps.upstream.outputs.build_needed == 'true'
+        if: steps.resolve.outputs.build_needed == 'true'
         run: sdkmanager "ndk;$NDK_VERSION"
 
-      - name: Pin libXray and test adapter lifecycle
-        if: steps.upstream.outputs.build_needed == 'true'
+      - name: Pin exact libXray commit and test lifecycle
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
-          # Build the exact commit recorded in manifest.json. Deriving a Go
-          # module version from the release date could otherwise select a
-          # different revision while still claiming the release-tag commit.
-          go get "github.com/xtls/libxray@${{ steps.upstream.outputs.commit }}"
+          go get "github.com/xtls/libxray@${{ steps.resolve.outputs.upstream_commit }}"
           go mod tidy
           go test ./...
 
-      - name: Build four Android ABIs twice
-        if: steps.upstream.outputs.build_needed == 'true'
+      - name: Build and verify four ABIs twice
+        if: steps.resolve.outputs.build_needed == 'true'
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
@@ -116,64 +166,126 @@ jobs:
           done
 
       - name: Enable KVM
-        if: steps.upstream.outputs.build_needed == 'true'
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Smoke-test real Xray on Android API 26
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 26
-          target: default
-          arch: x86_64
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
+      - name: Smoke-test ABI 2 on Android API 26
+        if: steps.resolve.outputs.build_needed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: ./scripts/with_api26_emulator.sh ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
 
-      - name: Record exact upstream pin
-        if: steps.upstream.outputs.build_needed == 'true'
+      - name: Preserve exact module pins
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          mkdir -p dist/pins
+          cp go.mod go.sum dist/pins/
+
+      - name: Re-audit before handoff to publisher
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: ./scripts/audit_public_tree.py
+
+      - name: Upload verified candidate
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: xray-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/libxray-arm64-v8a.so
+            dist/libxray-armeabi-v7a.so
+            dist/libxray-x86.so
+            dist/libxray-x86_64.so
+            dist/pins/go.mod
+            dist/pins/go.sum
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: needs.build.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: exitfy-cores-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+      UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+      UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Download verified candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: xray-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Commit exact pin after stale-build guard
         id: wrapper
+        shell: bash
         run: |
           set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "main advanced after the read-only build; refusing to publish stale assets" >&2
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/candidate/pins/go.mod" go.mod
+          cp "$RUNNER_TEMP/candidate/pins/go.sum" go.sum
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add go.mod go.sum
           if ! git diff --cached --quiet; then
-            git commit -m "Pin libXray ${{ steps.upstream.outputs.tag }}"
+            git commit -m "Pin libXray $UPSTREAM_TAG"
             ./scripts/audit_public_tree.py
             git push origin HEAD:main
           fi
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Generate and verify schema 2 manifest
-        if: steps.upstream.outputs.build_needed == 'true'
+      - name: Generate and verify final manifest
         run: |
           set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
           ./scripts/generate_manifest.py \
-            --directory dist \
-            --upstream-tag "${{ steps.upstream.outputs.tag }}" \
-            --upstream-commit "${{ steps.upstream.outputs.commit }}" \
+            --directory "$candidate" \
+            --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
             --wrapper-commit "${{ steps.wrapper.outputs.commit }}" \
-            --release-tag "${{ steps.upstream.outputs.release_tag }}" \
-            --output dist/manifest.json
-          ./scripts/verify_manifest.py dist/manifest.json dist
+            --release-tag "$RELEASE_TAG" \
+            --output "$candidate/manifest.json"
+          ./scripts/verify_manifest.py "$candidate/manifest.json" "$candidate"
+          ./scripts/audit_public_tree.py
 
-      - name: Re-audit before publication
-        if: steps.upstream.outputs.publish_needed == 'true'
-        run: ./scripts/audit_public_tree.py
-
-      - name: Publish stable contract release
-        if: steps.upstream.outputs.publish_needed == 'true'
+      - name: Create verified draft and publish atomically
+        shell: bash
         run: |
-          gh release create "${{ steps.upstream.outputs.release_tag }}" \
-            dist/libxray-arm64-v8a.so \
-            dist/libxray-armeabi-v7a.so \
-            dist/libxray-x86.so \
-            dist/libxray-x86_64.so \
-            dist/manifest.json \
-            --title "Xray ${{ steps.upstream.outputs.tag }} · contract 1" \
-            --notes "Built from XTLS/libXray ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.commit }}) for Android API 26+. Manifest schema 2, core API 1, config contract 1."
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          gh release create "$RELEASE_TAG" --draft \
+            --title "Xray $UPSTREAM_TAG · core ABI 2" \
+            --notes "Independent exitFy build from XTLS/libXray $UPSTREAM_TAG ($UPSTREAM_COMMIT). Android API 26+, manifest schema 2, core API 2, config contract 1."
+          gh release upload "$RELEASE_TAG" \
+            "$candidate/libxray-arm64-v8a.so" \
+            "$candidate/libxray-armeabi-v7a.so" \
+            "$candidate/libxray-x86.so" \
+            "$candidate/libxray-x86_64.so" \
+            "$candidate/manifest.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            > "$RUNNER_TEMP/draft.json"
+          expected="libxray-arm64-v8a.so,libxray-armeabi-v7a.so,libxray-x86.so,libxray-x86_64.so,manifest.json"
+          actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
+          [[ "$actual" == "$expected" ]]
+          while IFS=$'\t' read -r name digest; do
+            local_digest="sha256:$(sha256sum "$candidate/$name" | awk '{print $1}')"
+            [[ "$digest" == "$local_digest" ]]
+          done < <(jq -r '.assets[] | [.name, .digest] | @tsv' "$RUNNER_TEMP/draft.json")
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false

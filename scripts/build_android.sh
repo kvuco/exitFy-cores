@@ -7,6 +7,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=ndk_env.sh
 source "$script_dir/ndk_env.sh"
 
@@ -29,13 +30,13 @@ build_one() {
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM="$goarm" \
       CC="$compiler" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
-        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
+        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,--version-script=$repo_root/scripts/core_exports.map,-z,max-page-size=16384" \
         -o "$output" ./cmd/exitfy-xray
   else
     CGO_ENABLED=1 GOOS=android GOARCH="$goarch" \
       CC="$compiler" \
       go build -buildmode=c-shared -trimpath -buildvcs=false \
-        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
+        -ldflags="-s -w -buildid= -checklinkname=0 -extldflags=-Wl,--version-script=$repo_root/scripts/core_exports.map,-z,max-page-size=16384" \
         -o "$output" ./cmd/exitfy-xray
   fi
 }

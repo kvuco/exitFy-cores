@@ -19,6 +19,8 @@ FORBIDDEN_TEXT = (
     "C:" + "\\Users\\",
 )
 HOME_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?:home)/[^/\s]+/")
+ACTION_USE = re.compile(r"(?m)^\s*-?\s*uses:\s*([^@\s]+)@([^\s#]+)")
+FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def public_files() -> list[Path]:
@@ -56,6 +58,16 @@ def main() -> None:
                 break
         if HOME_PATH.search(text):
             failures.append(f"absolute local home path in {relative}")
+        if relative.startswith(".github/workflows/"):
+            for action, revision in ACTION_USE.findall(text):
+                if action.startswith("./"):
+                    continue
+                if not FULL_COMMIT.fullmatch(revision):
+                    failures.append(
+                        f"unpinned GitHub Action in {relative}: {action}@{revision}"
+                    )
+            if ("reactive" + "circus/android-emulator-runner") in text:
+                failures.append(f"third-party emulator action in {relative}")
 
     if failures:
         raise SystemExit("public-tree audit failed:\n" + "\n".join(sorted(set(failures))))

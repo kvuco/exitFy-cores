@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild and verify even when the current release exists
+        description: Build a new wrapper revision even when the current one is complete
         type: boolean
         default: false
   schedule:
@@ -19,145 +19,172 @@ on:
       - "THIRD_PARTY.md"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: singbox-release
+  group: singbox-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      build_needed: ${{ steps.resolve.outputs.build_needed }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_version: ${{ steps.resolve.outputs.upstream_version }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      go_version: ${{ steps.resolve.outputs.go_version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
     env:
       GH_TOKEN: ${{ github.token }}
       NDK_VERSION: 27.2.12479018
       SB_BUILD_TAGS: with_quic,with_utls,badlinkname,tfogo_checklinkname0
       GOTOOLCHAIN: local
+      FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Audit public repository contents
         run: ./scripts/audit_public_tree.py
 
-      - name: Resolve latest stable upstream
-        id: upstream
+      - name: Resolve stable upstream and wrapper revision
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          release_json="$(gh api 'repos/SagerNet/sing-box/releases?per_page=50' \
-            | jq -c 'map(select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))))[0]')"
-          if [[ -z "$release_json" || "$release_json" == null ]]; then
-            echo "No stable upstream release found" >&2
+          gh api --paginate --slurp \
+            'repos/SagerNet/sing-box/releases?per_page=100' \
+            | jq 'add' > "$RUNNER_TEMP/upstream-releases.json"
+          upstream="$(jq -c '
+            [ .[] | select(.draft == false and .prerelease == false)
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | (.tag_name | capture("^v(?<a>[0-9]+)\\.(?<b>[0-9]+)\\.(?<c>[0-9]+)$")
+                 | [(.a|tonumber),(.b|tonumber),(.c|tonumber)]) as $parts
+              | . + {parts:$parts} ] | sort_by(.parts) | last
+          ' "$RUNNER_TEMP/upstream-releases.json")"
+          if [[ -z "$upstream" || "$upstream" == null ]]; then
+            echo "No stable sing-box release found" >&2
             exit 1
           fi
-          upstream_tag="$(jq -r '.tag_name' <<<"$release_json")"
-          upstream_commit="$(gh api "repos/SagerNet/sing-box/commits/$upstream_tag" --jq '.sha')"
-          upstream_go_mod="$(gh api "repos/SagerNet/sing-box/contents/go.mod?ref=$upstream_tag" \
-            --jq '.content' | base64 --decode)"
-          go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$upstream_go_mod")"
+          upstream_tag="$(jq -r '.tag_name' <<<"$upstream")"
+          upstream_version="${upstream_tag#v}"
+          upstream_commit="$(gh api "repos/SagerNet/sing-box/commits/$upstream_tag" --jq .sha)"
+          go_mod="$(gh api "repos/SagerNet/sing-box/contents/go.mod?ref=$upstream_tag" \
+            --jq .content | base64 --decode)"
+          go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$go_mod")"
           if [[ ! "$go_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
             echo "Unsupported Go version: $go_version" >&2
             exit 1
           fi
-          release_tag="sb-$upstream_tag-w1"
-          release_exists=false
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            release_exists=true
+
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq 'add' > "$RUNNER_TEMP/core-releases.json"
+          prefix="sb-$upstream_tag-w"
+          max_revision="$(jq -r --arg prefix "$prefix" '
+            [ .[] | .tag_name
+              | select(startswith($prefix))
+              | try (capture("-w(?<n>[0-9]+)$").n | tonumber) catch empty ]
+            | max // 1
+          ' "$RUNNER_TEMP/core-releases.json")"
+          source_name="exitfy-sb-$upstream_tag-source.tar.gz"
+          expected_assets="$source_name,libexitfy-sb-arm64-v8a.so,libexitfy-sb-armeabi-v7a.so,libexitfy-sb-x86.so,libexitfy-sb-x86_64.so,manifest.json"
+          current=false
+          while IFS=$'\t' read -r tag assets manifest_id; do
+            [[ "$assets" == "$expected_assets" && -n "$manifest_id" ]] || continue
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$manifest_id" \
+              > "$RUNNER_TEMP/current-manifest.json"
+            if jq -e --arg upstream "$upstream_commit" --arg wrapper "$GITHUB_SHA" '
+              .schema == 2 and .coreApi == 2 and .configContract == 1
+              and .family == "sing_box" and .upstream.commit == $upstream
+              and .wrapper.commit == $wrapper
+            ' "$RUNNER_TEMP/current-manifest.json" >/dev/null; then
+              current=true
+              break
+            fi
+          done < <(jq -r --arg prefix "$prefix" '
+            .[] | select(.draft == false and .prerelease == false)
+            | select(.tag_name | startswith($prefix))
+            | [ .tag_name, ([.assets[].name] | sort | join(",")),
+                ([.assets[] | select(.name == "manifest.json") | .id][0] // "") ]
+            | @tsv
+          ' "$RUNNER_TEMP/core-releases.json")
+
+          build_needed=true
+          if [[ "$current" == true && "$FORCE_REBUILD" != true ]]; then
+            build_needed=false
           fi
-          force="${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}"
-          build_needed=false
-          if [[ "$GITHUB_EVENT_NAME" == push || "$force" == true || "$release_exists" == false ]]; then
-            build_needed=true
-          fi
+          revision=$((max_revision + 1))
+          release_tag="sb-$upstream_tag-w$revision"
           {
-            echo "tag=$upstream_tag"
-            echo "version=${upstream_tag#v}"
-            echo "commit=$upstream_commit"
+            echo "build_needed=$build_needed"
+            echo "upstream_tag=$upstream_tag"
+            echo "upstream_version=$upstream_version"
+            echo "upstream_commit=$upstream_commit"
             echo "go_version=$go_version"
             echo "release_tag=$release_tag"
-            echo "build_needed=$build_needed"
-            echo "publish_needed=$([[ "$release_exists" == false ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: actions/setup-go@v6
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: ${{ steps.upstream.outputs.go_version }}
+          go-version: ${{ steps.resolve.outputs.go_version }}
           cache-dependency-path: singbox/go.sum
 
       - name: Set up Android SDK
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: android-actions/setup-android@v3
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
       - name: Install Android NDK
-        if: steps.upstream.outputs.build_needed == 'true'
+        if: steps.resolve.outputs.build_needed == 'true'
         run: sdkmanager "ndk;$NDK_VERSION"
 
-      - name: Pin upstream and test adapter
-        if: steps.upstream.outputs.build_needed == 'true'
-        shell: bash
+      - name: Pin exact upstream and test adapter
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
           cd singbox
-          go get "github.com/sagernet/sing-box@${{ steps.upstream.outputs.commit }}"
-          go mod edit -go="${{ steps.upstream.outputs.go_version }}"
+          go get "github.com/sagernet/sing-box@${{ steps.resolve.outputs.upstream_commit }}"
+          go mod edit -go="${{ steps.resolve.outputs.go_version }}"
           go mod tidy
           resolved="$(go list -m -f '{{.Version}}' github.com/sagernet/sing-box)"
-          if [[ "$resolved" != "${{ steps.upstream.outputs.tag }}" ]]; then
-            echo "Resolved module $resolved does not match ${{ steps.upstream.outputs.tag }}" >&2
-            exit 1
-          fi
+          [[ "$resolved" == "${{ steps.resolve.outputs.upstream_tag }}" ]]
           go test -tags "$SB_BUILD_TAGS" ./...
 
-      - name: Preflight four Android ABIs
-        if: steps.upstream.outputs.build_needed == 'true'
+      - name: Preflight all Android ABIs
+        if: steps.resolve.outputs.build_needed == 'true'
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
-        shell: bash
         run: |
-          set -euo pipefail
           ./scripts/build_singbox_android.sh dist
           ./scripts/verify_singbox_artifacts.py dist
 
-      - name: Record exact upstream pin
-        if: steps.upstream.outputs.build_needed == 'true'
-        id: wrapper
-        shell: bash
+      - name: Build and audit corresponding source twice
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
           set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add singbox/go.mod singbox/go.sum
-          if ! git diff --cached --quiet; then
-            git commit -m "Pin SB upstream ${{ steps.upstream.outputs.tag }}"
-            ./scripts/audit_public_tree.py
-            git push origin HEAD:main
-          fi
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and audit corresponding source bundle
-        if: steps.upstream.outputs.build_needed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          source="dist/exitfy-sb-v${{ steps.upstream.outputs.version }}-source.tar.gz"
-          source_repro="dist-repro/exitfy-sb-v${{ steps.upstream.outputs.version }}-source.tar.gz"
+          source="dist/exitfy-sb-${{ steps.resolve.outputs.upstream_tag }}-source.tar.gz"
+          source_repro="dist-repro/exitfy-sb-${{ steps.resolve.outputs.upstream_tag }}-source.tar.gz"
           ./scripts/build_singbox_source_bundle.py \
-            --upstream-version "${{ steps.upstream.outputs.tag }}" --output "$source"
+            --upstream-version "${{ steps.resolve.outputs.upstream_tag }}" --output "$source"
           ./scripts/build_singbox_source_bundle.py \
-            --upstream-version "${{ steps.upstream.outputs.tag }}" --output "$source_repro"
+            --upstream-version "${{ steps.resolve.outputs.upstream_tag }}" --output "$source_repro"
           cmp "$source" "$source_repro"
           ./scripts/audit_singbox_source_bundle.py "$source"
 
-      - name: Rebuild release assets twice from attached source
-        if: steps.upstream.outputs.build_needed == 'true'
-        shell: bash
+      - name: Rebuild four ABIs twice from attached source
+        if: steps.resolve.outputs.build_needed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
           set -euo pipefail
-          version="${{ steps.upstream.outputs.version }}"
+          version="${{ steps.resolve.outputs.upstream_version }}"
           source="dist/exitfy-sb-v${version}-source.tar.gz"
           mkdir -p dist/source-a dist-repro/source-b dist/rebuilt dist-repro/rebuilt
           tar -xzf "$source" -C dist/source-a
@@ -174,56 +201,135 @@ jobs:
           cp dist/rebuilt/libexitfy-sb-*.so dist/
 
       - name: Enable KVM
-        if: steps.upstream.outputs.build_needed == 'true'
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Smoke-test release protocol matrix on Android API 26
-        if: steps.upstream.outputs.build_needed == 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 26
-          target: default
-          arch: x86_64
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./scripts/run_singbox_android_smoke.sh dist/libexitfy-sb-x86_64.so
+      - name: Smoke-test protocol matrix on Android API 26
+        if: steps.resolve.outputs.build_needed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: ./scripts/with_api26_emulator.sh ./scripts/run_singbox_android_smoke.sh dist/libexitfy-sb-x86_64.so
 
-      - name: Generate and verify schema 2 manifest
-        if: steps.upstream.outputs.build_needed == 'true'
-        shell: bash
+      - name: Preserve exact module pins
+        if: steps.resolve.outputs.build_needed == 'true'
         run: |
-          set -euo pipefail
-          source="dist/exitfy-sb-v${{ steps.upstream.outputs.version }}-source.tar.gz"
-          ./scripts/generate_singbox_manifest.py \
-            --directory dist \
-            --upstream-tag "${{ steps.upstream.outputs.tag }}" \
-            --upstream-commit "${{ steps.upstream.outputs.commit }}" \
-            --go-version "${{ steps.upstream.outputs.go_version }}" \
-            --wrapper-commit "${{ steps.wrapper.outputs.commit }}" \
-            --release-tag "${{ steps.upstream.outputs.release_tag }}" \
-            --source-bundle "$source" \
-            --output dist/manifest.json
-          ./scripts/verify_singbox_manifest.py dist/manifest.json dist "$source"
+          mkdir -p dist/pins
+          cp singbox/go.mod singbox/go.sum dist/pins/
 
-      - name: Re-audit before publication
-        if: steps.upstream.outputs.publish_needed == 'true'
+      - name: Re-audit before handoff to publisher
+        if: steps.resolve.outputs.build_needed == 'true'
         run: ./scripts/audit_public_tree.py
 
-      - name: Publish stable core contract
-        if: steps.upstream.outputs.publish_needed == 'true'
+      - name: Upload verified candidate
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: singbox-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/libexitfy-sb-arm64-v8a.so
+            dist/libexitfy-sb-armeabi-v7a.so
+            dist/libexitfy-sb-x86.so
+            dist/libexitfy-sb-x86_64.so
+            dist/exitfy-sb-${{ steps.resolve.outputs.upstream_tag }}-source.tar.gz
+            dist/pins/go.mod
+            dist/pins/go.sum
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: needs.build.outputs.build_needed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: exitfy-cores-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+      UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+      UPSTREAM_VERSION: ${{ needs.build.outputs.upstream_version }}
+      UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+      GO_VERSION: ${{ needs.build.outputs.go_version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Download verified candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: singbox-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Commit exact pin after stale-build guard
+        id: wrapper
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "${{ steps.upstream.outputs.release_tag }}" \
-            dist/libexitfy-sb-arm64-v8a.so \
-            dist/libexitfy-sb-armeabi-v7a.so \
-            dist/libexitfy-sb-x86.so \
-            dist/libexitfy-sb-x86_64.so \
-            dist/manifest.json \
-            "dist/exitfy-sb-v${{ steps.upstream.outputs.version }}-source.tar.gz" \
-            --title "exitFy SB core ${{ steps.upstream.outputs.version }} · contract 1" \
-            --notes "Independent exitFy build based on SagerNet upstream ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.commit }}). Not affiliated with or endorsed by SagerNet. Android API 26+, core API 1, config contract 1. The combined core is distributed under GPL-3.0-or-later; corresponding source is attached."
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "main advanced after the read-only build; refusing to publish stale assets" >&2
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/candidate/pins/go.mod" singbox/go.mod
+          cp "$RUNNER_TEMP/candidate/pins/go.sum" singbox/go.sum
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add singbox/go.mod singbox/go.sum
+          if ! git diff --cached --quiet; then
+            git commit -m "Pin SB upstream $UPSTREAM_TAG"
+            ./scripts/audit_public_tree.py
+            git push origin HEAD:main
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and verify final manifest
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          source="$candidate/exitfy-sb-$UPSTREAM_TAG-source.tar.gz"
+          ./scripts/generate_singbox_manifest.py \
+            --directory "$candidate" \
+            --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --go-version "$GO_VERSION" \
+            --wrapper-commit "${{ steps.wrapper.outputs.commit }}" \
+            --release-tag "$RELEASE_TAG" \
+            --source-bundle "$source" \
+            --output "$candidate/manifest.json"
+          ./scripts/verify_singbox_manifest.py \
+            "$candidate/manifest.json" "$candidate" "$source"
+          ./scripts/audit_public_tree.py
+
+      - name: Create verified draft and publish atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          source_name="exitfy-sb-$UPSTREAM_TAG-source.tar.gz"
+          gh release create "$RELEASE_TAG" --draft \
+            --title "exitFy SB core $UPSTREAM_VERSION · core ABI 2" \
+            --notes "Independent exitFy build based on SagerNet $UPSTREAM_TAG ($UPSTREAM_COMMIT). Not affiliated with or endorsed by SagerNet. Android API 26+, core API 2, config contract 1, GPL-3.0-or-later; corresponding source is attached."
+          gh release upload "$RELEASE_TAG" \
+            "$candidate/libexitfy-sb-arm64-v8a.so" \
+            "$candidate/libexitfy-sb-armeabi-v7a.so" \
+            "$candidate/libexitfy-sb-x86.so" \
+            "$candidate/libexitfy-sb-x86_64.so" \
+            "$candidate/manifest.json" \
+            "$candidate/$source_name"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            > "$RUNNER_TEMP/draft.json"
+          expected="$source_name,libexitfy-sb-arm64-v8a.so,libexitfy-sb-armeabi-v7a.so,libexitfy-sb-x86.so,libexitfy-sb-x86_64.so,manifest.json"
+          actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
+          [[ "$actual" == "$expected" ]]
+          while IFS=$'\t' read -r name digest; do
+            local_digest="sha256:$(sha256sum "$candidate/$name" | awk '{print $1}')"
+            [[ "$digest" == "$local_digest" ]]
+          done < <(jq -r '.assets[] | [.name, .digest] | @tsv' "$RUNNER_TEMP/draft.json")
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false

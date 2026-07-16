@@ -130,6 +130,44 @@ func TestFailedStartResponseRequiresSerializedStopBeforeRetry(t *testing.T) {
 	}
 }
 
+func TestStopErrorIsReturnedAndRetryable(t *testing.T) {
+	lifecycle.Lock()
+	lifecycle.running = false
+	lifecycle.stopRequired = false
+	lifecycle.Unlock()
+	originalInvoke := invokeLibXray
+	defer func() {
+		invokeLibXray = originalInvoke
+		lifecycle.Lock()
+		lifecycle.running = false
+		lifecycle.stopRequired = false
+		lifecycle.Unlock()
+	}()
+
+	stopCalls := 0
+	invokeLibXray = func(request string) string {
+		if strings.Contains(request, `"method":"stopXray"`) {
+			stopCalls++
+			if stopCalls == 1 {
+				return `{"success":false,"error":"stop failed"}`
+			}
+		}
+		return `{"success":true,"error":""}`
+	}
+	if err := Start(`{"log":{"loglevel":"none"}}`); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := Stop(); err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("Stop error was lost: %v", err)
+	}
+	if err := Start(`{"log":{"loglevel":"none"}}`); err == nil {
+		t.Fatal("start was accepted before successful Stop retry")
+	}
+	if err := Stop(); err != nil {
+		t.Fatalf("Stop retry: %v", err)
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

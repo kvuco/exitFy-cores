@@ -32,8 +32,11 @@ func StartCore(configJSON *C.char) *C.char {
 }
 
 //export StopCore
-func StopCore() {
-	_ = bridge.Stop()
+func StopCore() *C.char {
+	if err := bridge.Stop(); err != nil {
+		return C.CString(bridge.SafeError(err.Error()))
+	}
+	return nil
 }
 
 func main() {}

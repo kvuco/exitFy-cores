@@ -201,6 +201,31 @@ func TestStopWaitsForSerializedStart(t *testing.T) {
 	}
 }
 
+func TestStopErrorIsReturnedAndRetryable(t *testing.T) {
+	closeAttempts := 0
+	withFactory(t, func(context.Context, option.Options) (core, error) {
+		return &fakeCore{close: func() error {
+			closeAttempts++
+			if closeAttempts == 1 {
+				return errors.New("stop failed")
+			}
+			return nil
+		}}, nil
+	})
+	if err := Start(validConfig); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := Stop(); err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("Stop error was lost: %v", err)
+	}
+	if err := Start(validConfig); err == nil {
+		t.Fatal("start was accepted before successful Stop retry")
+	}
+	if err := Stop(); err != nil {
+		t.Fatalf("Stop retry: %v", err)
+	}
+}
+
 func TestConcurrentStartsCreateOneInstance(t *testing.T) {
 	var access sync.Mutex
 	created := 0

@@ -50,7 +50,7 @@ build_one() {
     env "${build_env[@]}" go build \
       -buildmode=c-shared -trimpath -buildvcs=false \
       -tags "$build_tags" \
-      -ldflags="-X github.com/sagernet/sing-box/constant.Version=${upstream_version#v} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" \
+      -ldflags="-X github.com/sagernet/sing-box/constant.Version=${upstream_version#v} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0 -extldflags=-Wl,--version-script=$repo_root/scripts/core_exports.map,-z,max-page-size=16384" \
       -o "$output" ./cmd/exitfy-sb
   )
   rm -f "${output%.so}.h"

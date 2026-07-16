@@ -18,8 +18,9 @@ publishes:
 - libxray-x86_64.so
 - manifest.json
 
-`manifest.json` uses schema 2 with `coreApi: 1` and `configContract: 1`.
-Stable release names end in `-w1`, for example `xray-v26.7.11-w1`.
+`manifest.json` uses schema 2 with `coreApi: 2` and `configContract: 1`.
+ABI 2 release names use wrapper revision `w2` or newer, for example
+`xray-v26.7.11-w2`.
 
 The independent SB workflow tracks only stable SagerNet upstream releases and
 uses a separate Go module so its dependency graph cannot change the libXray
@@ -33,18 +34,29 @@ uTLS/Reality. It publishes:
 - `manifest.json`
 - a reproducible corresponding-source bundle
 
-SB release names use `sb-v<upstream>-w1`. These builds are not affiliated
+SB release names use `sb-v<upstream>-wN`. These builds are not affiliated
 with or endorsed by SagerNet.
 
 The exported ABI is deliberately small:
 
 - StartCore(const char *configJson) returns NULL on success or a malloc-owned
   sanitized error string.
-- StopCore() is synchronized and idempotent.
+- StopCore() is synchronized and idempotent and returns NULL on success or a
+  malloc-owned sanitized error string.
+
+Only `StartCore` and `StopCore` are exported as defined dynamic functions.
 
 Release integrity uses GitHub's asset digest plus the SHA-256 values in the
 manifest. This detects corruption but does not add a trust root independent
-from GitHub Releases.
+from GitHub Releases. exitFy deliberately downloads through trust-all TLS;
+under that accepted policy, the hashes do not prevent a targeted MITM from
+replacing the `.so`, manifest, and advertised digest together.
+
+Workflow build/test jobs are read-only. A separate serialized publisher has
+the minimal `contents: write` permission, records exact module pins, creates a
+draft, verifies the complete asset set and GitHub digests, and only then makes
+the release public. Every external Action is pinned to a full commit SHA; the
+API 26 emulator is launched by the repository's own shell runner.
 
 ## Local build
 

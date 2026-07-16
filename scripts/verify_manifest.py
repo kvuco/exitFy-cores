@@ -36,7 +36,7 @@ def main() -> None:
         raise ValueError("manifest top-level fields do not match schema 2")
     if (
         value.get("schema") != 2
-        or value.get("coreApi") != 1
+        or value.get("coreApi") != 2
         or value.get("configContract") != 1
         or value.get("family") != "xray"
         or value.get("minAndroidApi") != 26
@@ -48,7 +48,10 @@ def main() -> None:
     release_tag = value.get("releaseTag", "")
     if (
         not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", upstream.get("tag", ""))
-        or release_tag != f"xray-{upstream.get('tag')}-w1"
+        or not re.fullmatch(
+            rf"xray-{re.escape(upstream.get('tag', ''))}-w(?:[2-9]|[1-9][0-9]+)",
+            release_tag,
+        )
         or upstream.get("repository") != "XTLS/libXray"
         or wrapper.get("repository") != "kvuco/exitFy-cores"
         or not re.fullmatch(r"[0-9a-f]{40}", upstream.get("commit", ""))

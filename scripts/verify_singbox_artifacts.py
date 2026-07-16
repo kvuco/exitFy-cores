@@ -35,9 +35,11 @@ def verify(directory: Path) -> None:
                 f"{path.name}: wrong ELF class/machine "
                 f"{info.elf_class}/{info.machine}"
             )
-        missing = REQUIRED_EXPORTS - info.exports
-        if missing:
-            raise ValueError(f"{path.name}: missing exports {sorted(missing)}")
+        if info.exports != REQUIRED_EXPORTS:
+            raise ValueError(
+                f"{path.name}: defined function exports must be exactly "
+                f"{sorted(REQUIRED_EXPORTS)}, got {sorted(info.exports)}"
+            )
         if min(info.load_alignments) < MIN_ANDROID_PAGE_ALIGNMENT:
             raise ValueError(
                 f"{path.name}: PT_LOAD alignment is below "

@@ -39,7 +39,7 @@ def main() -> None:
         raise ValueError("manifest top-level fields do not match schema 2")
     if (
         value.get("schema") != 2
-        or value.get("coreApi") != 1
+        or value.get("coreApi") != 2
         or value.get("configContract") != 1
         or value.get("family") != "sing_box"
         or value.get("minAndroidApi") != 26
@@ -55,7 +55,9 @@ def main() -> None:
     if (
         upstream.get("repository") != "SagerNet/sing-box"
         or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", upstream_tag)
-        or release_tag != f"sb-{upstream_tag}-w1"
+        or not re.fullmatch(
+            rf"sb-{re.escape(upstream_tag)}-w(?:[2-9]|[1-9][0-9]+)", release_tag
+        )
         or not re.fullmatch(r"[0-9a-f]{40}", upstream.get("commit", ""))
         or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", upstream.get("goVersion", ""))
         or wrapper.get("repository") != "kvuco/exitFy-cores"

@@ -79,6 +79,15 @@ def json_stream(value: str):
         yield item
 
 
+def command_json_documents(
+    command: list[str], directory: Path, environment: dict[str, str]
+) -> list[dict[str, object]]:
+    output = subprocess.check_output(
+        command, cwd=directory, env=environment, text=True
+    )
+    return list(json_stream(output))
+
+
 def copy_file(source: Path, destination: Path) -> None:
     if source.is_symlink():
         raise ValueError(f"minimal vendor does not allow symlinks: {source}")
@@ -108,18 +117,37 @@ def build_minimal_vendor(module: Path, environment: dict[str, str]) -> None:
         )
         packages.extend(json_stream(output))
 
-    # Let Go produce the canonical modules.txt, then replace the intentionally
-    # broad vendor tree with only packages compiled for our Android adapter.
-    subprocess.run(["go", "mod", "vendor"], cwd=module, env=environment, check=True)
-    full_vendor = module / "vendor"
-    modules_text = (full_vendor / "modules.txt").read_bytes()
+    # `go mod vendor` treats almost every build tag as enabled and downloads
+    # multi-gigabyte optional Cronet/TUN/Tailscale modules that exitFy does not
+    # compile. Build the canonical minimal modules.txt from the explicit module
+    # graph and the exact four-ABI package list instead.
+    edit = json.loads(
+        subprocess.check_output(
+            ["go", "mod", "edit", "-json"],
+            cwd=module,
+            env=environment,
+            text=True,
+        )
+    )
+    if edit.get("Replace"):
+        raise ValueError("minimal vendor does not allow module replacements")
+    explicit = {
+        item["Path"]: item["Version"] for item in edit.get("Require", [])
+    }
+    module_metadata = {
+        item["Path"]: item
+        for item in command_json_documents(
+            ["go", "list", "-m", "-json", "all"], module, environment
+        )
+        if not item.get("Main")
+    }
     minimal_vendor = module / ".vendor-minimal"
     if minimal_vendor.exists():
         shutil.rmtree(minimal_vendor)
     minimal_vendor.mkdir()
-    (minimal_vendor / "modules.txt").write_bytes(modules_text)
 
     module_roots: dict[str, Path] = {}
+    module_packages: dict[str, set[str]] = {}
     for package in packages:
         module_info = package.get("Module") or {}
         if not module_info or module_info.get("Main"):
@@ -141,6 +169,7 @@ def build_minimal_vendor(module: Path, environment: dict[str, str]) -> None:
                     raise ValueError(f"listed Go source is missing: {source}")
                 copy_file(source, destination / relative)
         module_roots[module_path] = module_dir
+        module_packages.setdefault(module_path, set()).add(import_path)
 
     for module_path, module_dir in module_roots.items():
         destination = minimal_vendor / module_path
@@ -149,7 +178,29 @@ def build_minimal_vendor(module: Path, environment: dict[str, str]) -> None:
                 if source.is_file():
                     copy_file(source, destination / source.name)
 
-    shutil.rmtree(full_vendor)
+    modules_lines: list[str] = []
+    for module_path in sorted(set(explicit) | set(module_packages)):
+        metadata = module_metadata.get(module_path) or {}
+        version = explicit.get(module_path) or metadata.get("Version", "")
+        if not version:
+            raise ValueError(f"missing module version for {module_path}")
+        modules_lines.append(f"# {module_path} {version}")
+        annotations: list[str] = []
+        if module_path in explicit:
+            annotations.append("explicit")
+        go_version = metadata.get("GoVersion", "")
+        if go_version:
+            annotations.append(f"go {go_version}")
+        if annotations:
+            modules_lines.append("## " + "; ".join(annotations))
+        modules_lines.extend(sorted(module_packages.get(module_path, set())))
+    (minimal_vendor / "modules.txt").write_text(
+        "\n".join(modules_lines) + "\n", encoding="utf-8"
+    )
+
+    full_vendor = module / "vendor"
+    if full_vendor.exists():
+        shutil.rmtree(full_vendor)
     minimal_vendor.rename(full_vendor)
     for goarch, goarm in (("arm64", ""), ("arm", "7"), ("386", ""), ("amd64", "")):
         list_environment = environment.copy()
