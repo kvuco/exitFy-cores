@@ -228,6 +228,33 @@ class ReleaseDraftStateTest(unittest.TestCase):
         ]
         self.assertEqual(next_wrapper_revision(releases, "sb-v1.13.14-w"), 8)
 
+    def test_run_unique_offset_avoids_invisible_stale_drafts(self) -> None:
+        releases = [release("sb-v1.13.14-w2", draft=False)]
+        self.assertEqual(
+            next_wrapper_revision(releases, "sb-v1.13.14-w", run_offset=1004),
+            1006,
+        )
+        releases.append(release("sb-v1.13.14-w1008", draft=False))
+        first_run = next_wrapper_revision(
+            releases, "sb-v1.13.14-w", run_offset=1004
+        )
+        next_run = next_wrapper_revision(
+            releases, "sb-v1.13.14-w", run_offset=1005
+        )
+        self.assertEqual(first_run, 2012)
+        self.assertEqual(next_run, 2013)
+        self.assertNotEqual(first_run, next_run)
+        for invalid in (True, 0, -1, 2_147_483_648):
+            with self.assertRaisesRegex(ValueError, "run offset"):
+                next_wrapper_revision(
+                    releases, "sb-v1.13.14-w", run_offset=invalid
+                )
+        with self.assertRaisesRegex(ValueError, "supported range"):
+            next_wrapper_revision(
+                [release("sb-v1.13.14-w2147483647", draft=False)],
+                "sb-v1.13.14-w",
+            )
+
     def test_stale_draft_tag_cannot_wedge_a_later_wrapper_commit(self) -> None:
         old_commit = "a" * 40
         new_commit = "b" * 40

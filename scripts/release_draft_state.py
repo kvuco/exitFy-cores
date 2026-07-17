@@ -171,9 +171,13 @@ def verified_ready_draft(
     return draft
 
 
-def next_wrapper_revision(releases: list[dict[str, Any]], prefix: str) -> int:
+def next_wrapper_revision(
+    releases: list[dict[str, Any]], prefix: str, run_offset: int = 1
+) -> int:
     if not prefix or any(character.isspace() for character in prefix):
         raise ValueError("release prefix is invalid")
+    if type(run_offset) is not int or run_offset < 1 or run_offset > 2_147_483_647:
+        raise ValueError("wrapper run offset is invalid")
     pattern = re.compile(re.escape(prefix) + r"([1-9][0-9]*)\Z")
     maximum = 1
     seen_tags: set[str] = set()
@@ -214,7 +218,14 @@ def next_wrapper_revision(releases: list[dict[str, Any]], prefix: str) -> int:
         # Every exact public or draft tag reserves its revision. Public tags
         # remain reserved even when incomplete or accidentally prerelease.
         maximum = max(maximum, int(match.group(1)))
-    return maximum + 1
+    # A contents:read workflow token cannot enumerate drafts. Adding a
+    # monotonic per-run offset to the nondecreasing public maximum makes two
+    # different runs choose different tags even when an older draft is hidden
+    # from both of them. A rerun with the same public state remains stable.
+    revision = maximum + run_offset
+    if revision > 2_147_483_647:
+        raise ValueError("next wrapper revision exceeds the supported range")
+    return revision
 
 
 def ensure_not_downgrade(
@@ -309,6 +320,7 @@ def main() -> None:
     parser.add_argument("--references", type=Path)
     parser.add_argument("--tag")
     parser.add_argument("--prefix")
+    parser.add_argument("--run-offset", type=int)
     parser.add_argument("--commit")
     parser.add_argument("--family", choices=tuple(FAMILY_PREFIXES))
     parser.add_argument("--upstream-tag")
@@ -323,6 +335,7 @@ def main() -> None:
             or args.commit is None
             or args.releases is not None
             or args.prefix is not None
+            or args.run_offset is not None
             or args.family is not None
             or args.upstream_tag is not None
             or args.expected_asset
@@ -348,6 +361,7 @@ def main() -> None:
             args.family is None
             or args.upstream_tag is None
             or args.prefix is not None
+            or args.run_offset is not None
             or args.tag is not None
             or args.commit is not None
             or args.expected_asset
@@ -368,9 +382,15 @@ def main() -> None:
             or args.expected_asset
         ):
             parser.error("next-revision requires --prefix and does not accept --tag")
-        print(next_wrapper_revision(releases, args.prefix))
+        run_offset = 1 if args.run_offset is None else args.run_offset
+        print(next_wrapper_revision(releases, args.prefix, run_offset))
         return
-    if args.tag is None or args.commit is None or args.prefix is not None:
+    if (
+        args.tag is None
+        or args.commit is None
+        or args.prefix is not None
+        or args.run_offset is not None
+    ):
         parser.error(
             f"{args.mode} requires --tag and --commit and does not accept --prefix"
         )

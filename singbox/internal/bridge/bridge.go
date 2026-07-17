@@ -213,7 +213,15 @@ func closeCore(instance core) (err error) {
 }
 
 func createCore(ctx context.Context, options option.Options) (core, error) {
-	return box.New(box.Options{Context: ctx, Options: options})
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	if err != nil {
+		// Do not convert a nil *box.Box into a non-nil core interface.  The
+		// upstream constructor returns (*Box)(nil), err on validation failures;
+		// returning that pair directly would make the interface look owned and
+		// make cleanup call Close on a nil receiver.
+		return nil, err
+	}
+	return instance, nil
 }
 
 // SafeError bounds errors crossing the native boundary and removes values

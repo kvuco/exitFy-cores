@@ -575,4 +575,13 @@ func TestUnsupportedBuildFeatureIsRejected(t *testing.T) {
 		_ = Stop()
 		t.Fatal("unsupported WireGuard endpoint was accepted")
 	}
+	if err = Stop(); err != nil {
+		t.Fatalf("failed constructor left a poisoned lifecycle: %v", err)
+	}
+	if err = Start(validConfig); err != nil {
+		t.Fatalf("valid retry after constructor rejection failed: %v", err)
+	}
+	if err = Stop(); err != nil {
+		t.Fatalf("stop after valid retry: %v", err)
+	}
 }

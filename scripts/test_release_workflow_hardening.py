@@ -239,6 +239,20 @@ class ReleaseWorkflowHardeningTest(unittest.TestCase):
                 self.assertNotIn("contents: write", build)
                 self.assertIn("contents: write", publish)
 
+    def test_read_only_build_reserves_a_run_unique_wrapper_revision(self) -> None:
+        for family, path in WORKFLOWS.items():
+            with self.subTest(family=family):
+                workflow = path.read_text(encoding="utf-8")
+                build = workflow.split("  build:\n", 1)[1].split(
+                    "  publish:\n", 1
+                )[0]
+                self.assertIn('WRAPPER_REVISION_EPOCH: "1000"', build)
+                self.assertIn(
+                    "run_offset=$((WRAPPER_REVISION_EPOCH + GITHUB_RUN_NUMBER))",
+                    build,
+                )
+                self.assertIn('--run-offset "$run_offset"', build)
+
 
 if __name__ == "__main__":
     unittest.main()

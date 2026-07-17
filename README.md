@@ -57,11 +57,14 @@ the minimal `contents: write` permission, records exact module pins, creates a
 draft, verifies the complete asset set and GitHub digests, and only then makes
 the release public. Publisher-only reruns empty and reuse their exact draft,
 retarget it to the same verified wrapper commit, and check both the draft target
-and final Git tag against that commit. A later workflow run treats every
-existing exact draft revision as reserved and advances to the next `wN`, so it
-never retargets an older draft's provenance. Every external Action is pinned to
-a full commit SHA; the API 26 emulator is launched by the repository's own
-shell runner.
+and final Git tag against that commit. A read-only build token cannot enumerate
+draft releases, so every new workflow run also adds a monotonic run-specific
+offset to the visible public wrapper maximum. That reservation scheme prevents
+an invisible stale draft from capturing a later run's candidate tag; the epoch
+is explicitly bumped if a workflow counter is ever reset. The publisher still
+refuses to retarget any older draft's provenance. Every external Action is
+pinned to a full commit SHA; the API 26 emulator is launched by the repository's
+own shell runner.
 
 The hardened publishers live at unique v2 workflow paths. A job-level guard
 rejects `workflow_dispatch` from anything except the default branch before a

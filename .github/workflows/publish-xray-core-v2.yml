@@ -55,6 +55,11 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       GOPROXY: https://proxy.golang.org
       GOSUMDB: sum.golang.org
+      # contents:read cannot enumerate drafts.  Keep each new workflow run in
+      # a monotonic reservation band so a stale draft from an earlier commit
+      # cannot capture the candidate tag.  Bump this epoch if this workflow's
+      # run-number counter is ever reset.
+      WRAPPER_REVISION_EPOCH: "1000"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -115,8 +120,10 @@ jobs:
             --releases "$RUNNER_TEMP/core-releases.json" \
             --family xray --upstream-tag "$upstream_tag"
           prefix="xray-$upstream_tag-w"
+          run_offset=$((WRAPPER_REVISION_EPOCH + GITHUB_RUN_NUMBER))
           revision="$(./scripts/release_draft_state.py next-revision \
-            --releases "$RUNNER_TEMP/core-releases.json" --prefix "$prefix")"
+            --releases "$RUNNER_TEMP/core-releases.json" --prefix "$prefix" \
+            --run-offset "$run_offset")"
           current=false
           candidate="$(jq -c --arg prefix "$prefix" '
             [ .[] | select(.draft == false and .prerelease == false)
