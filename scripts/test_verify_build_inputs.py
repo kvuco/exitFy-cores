@@ -273,6 +273,61 @@ class BuildInputVerificationTest(unittest.TestCase):
                         root, head, {"go.mod", "intent.txt"}
                     )
 
+    def test_tree_gate_accepts_equivalent_index_refresh_during_settlement(self) -> None:
+        root = repository(self)
+        head = git(root, "rev-parse", "HEAD")
+        index = root / ".git" / "index"
+        real_assert = verify_build_inputs._assert_default_index_entries
+        calls = 0
+
+        def refresh_after_first_read(directory):
+            nonlocal calls
+            logical = real_assert(directory)
+            calls += 1
+            if calls == 1:
+                replacement = index.with_name("index.refresh")
+                replacement.write_bytes(index.read_bytes())
+                os.replace(replacement, index)
+            return logical
+
+        with mock.patch.object(
+            verify_build_inputs,
+            "_assert_default_index_entries",
+            side_effect=refresh_after_first_read,
+        ):
+            verify_build_inputs.assert_repository_state(root, head, set())
+
+        self.assertEqual(4, calls)
+
+    def test_tree_gate_rejects_equivalent_index_replacement_after_pin(self) -> None:
+        root = repository(self)
+        head = git(root, "rev-parse", "HEAD")
+        index = root / ".git" / "index"
+        real_assert = verify_build_inputs._assert_default_index_entries
+        calls = 0
+
+        def replace_during_protected_scan(directory):
+            nonlocal calls
+            logical = real_assert(directory)
+            calls += 1
+            if calls == 3:
+                replacement = index.with_name("index.raced")
+                replacement.write_bytes(index.read_bytes())
+                os.replace(replacement, index)
+            return logical
+
+        with (
+            mock.patch.object(
+                verify_build_inputs,
+                "_assert_default_index_entries",
+                side_effect=replace_during_protected_scan,
+            ),
+            self.assertRaisesRegex(ValueError, "Git index changed"),
+        ):
+            verify_build_inputs.assert_repository_state(root, head, set())
+
+        self.assertEqual(4, calls)
+
     def test_tree_gate_rejects_split_index(self) -> None:
         root = repository(self)
         head = git(root, "rev-parse", "HEAD")

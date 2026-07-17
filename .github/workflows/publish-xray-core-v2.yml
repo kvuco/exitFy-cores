@@ -647,12 +647,38 @@ jobs:
               "$candidate/libxray-x86.so" \
               "$candidate/libxray-x86_64.so" \
               "$candidate/manifest.json" --clobber
-            ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
-              "$RUNNER_TEMP/releases-after.json"
-            ./scripts/release_draft_state.py verify \
-              --releases "$RUNNER_TEMP/releases-after.json" --tag "$RELEASE_TAG" \
-              --commit "$wrapper_commit" \
-              > "$RUNNER_TEMP/draft.json"
+            draft_ready=false
+            for attempt in 1 2 3 4 5 6; do
+              ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+                "$RUNNER_TEMP/releases-after.json"
+              if ./scripts/release_draft_state.py verify-ready \
+                  --releases "$RUNNER_TEMP/releases-after.json" \
+                  --tag "$RELEASE_TAG" --commit "$wrapper_commit" \
+                  --expected-asset libxray-arm64-v8a.so \
+                  --expected-asset libxray-armeabi-v7a.so \
+                  --expected-asset libxray-x86.so \
+                  --expected-asset libxray-x86_64.so \
+                  --expected-asset manifest.json \
+                  > "$RUNNER_TEMP/draft.pending.json"; then
+                mv "$RUNNER_TEMP/draft.pending.json" "$RUNNER_TEMP/draft.json"
+                draft_ready=true
+                break
+              else
+                status=$?
+              fi
+              if [[ "$status" -ne 75 ]]; then
+                exit "$status"
+              fi
+              if [[ "$attempt" -lt 6 ]]; then
+                sleep_seconds=$((1 << (attempt - 1)))
+                echo "draft metadata is not visible yet; retrying in ${sleep_seconds}s" >&2
+                sleep "$sleep_seconds"
+              fi
+            done
+            if [[ "$draft_ready" != true ]]; then
+              echo "verified draft did not become ready after six attempts" >&2
+              exit 1
+            fi
             draft_id="$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
             expected="libxray-arm64-v8a.so,libxray-armeabi-v7a.so,libxray-x86.so,libxray-x86_64.so,manifest.json"
             actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"

@@ -195,6 +195,37 @@ class ReleaseWorkflowHardeningTest(unittest.TestCase):
                     publish.index("gh release upload"),
                 )
 
+    def test_new_draft_visibility_retry_is_bounded_and_fail_closed(self) -> None:
+        expected_counts = {"xray": 5, "sing_box": 6}
+        for family, path in WORKFLOWS.items():
+            with self.subTest(family=family):
+                workflow = path.read_text(encoding="utf-8")
+                publish = workflow.split("  publish:\n", 1)[1]
+                upload = publish.index("gh release upload")
+                ready = publish.index("release_draft_state.py verify-ready")
+                remote = publish.index("verify_remote_release.py", ready)
+                retry = publish[upload:remote]
+
+                self.assertLess(upload, ready)
+                self.assertLess(ready, remote)
+                self.assertIn("for attempt in 1 2 3 4 5 6", retry)
+                self.assertIn('if [[ "$status" -ne 75 ]]', retry)
+                self.assertIn('if [[ "$attempt" -lt 6 ]]', retry)
+                self.assertIn("sleep_seconds=$((1 << (attempt - 1)))", retry)
+                self.assertIn('if [[ "$draft_ready" != true ]]', retry)
+                self.assertEqual(
+                    retry.count("--expected-asset"), expected_counts[family]
+                )
+
+                # Readiness polling is additive: final exact-set, remote
+                # manifest and local digest verification still gate publish.
+                self.assertIn("draft asset set is incomplete or unexpected", publish)
+                self.assertIn("GitHub asset digest differs", publish)
+                self.assertLess(
+                    publish.index("draft asset set is incomplete or unexpected"),
+                    publish.index("gh api --method PATCH", remote),
+                )
+
     def test_actions_are_full_sha_pinned_and_write_token_is_publish_only(self) -> None:
         for family, path in WORKFLOWS.items():
             with self.subTest(family=family):

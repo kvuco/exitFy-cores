@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from release_draft_state import (
+    DRAFT_NOT_READY_EXIT,
+    DraftNotReady,
     ensure_not_downgrade,
     next_wrapper_revision,
     prepare_plan,
     verify_tag_references,
     verified_draft,
+    verified_ready_draft,
 )
 
 
 TAG = "sb-v1.13.14-w2"
 COMMIT = "a" * 40
+READY_ASSETS = ("core.so", "manifest.json")
 
 
 def release(
@@ -35,6 +44,30 @@ def release(
             for asset_id in asset_ids
         ],
     }
+
+
+def ready_release(
+    *,
+    assets: tuple[str, ...] = READY_ASSETS,
+    target_commitish: str = COMMIT,
+) -> dict:
+    value = release(
+        TAG,
+        draft=True,
+        release_id=44,
+        asset_ids=tuple(range(1, len(assets) + 1)),
+        target_commitish=target_commitish,
+    )
+    value["assets"] = [
+        {
+            "id": index,
+            "name": name,
+            "size": index * 1024,
+            "digest": f"sha256:{index:064x}",
+        }
+        for index, name in enumerate(assets, 1)
+    ]
+    return value
 
 
 class ReleaseDraftStateTest(unittest.TestCase):
@@ -81,6 +114,104 @@ class ReleaseDraftStateTest(unittest.TestCase):
     def test_verify_requires_exactly_one_draft(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing"):
             verified_draft([], TAG, COMMIT)
+
+    def test_ready_verify_treats_missing_or_incomplete_visibility_as_transient(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(DraftNotReady, "not visible"):
+            verified_ready_draft([], TAG, COMMIT, list(READY_ASSETS))
+
+        incomplete = ready_release(assets=("core.so",))
+        with self.assertRaisesRegex(DraftNotReady, "asset set"):
+            verified_ready_draft(
+                [incomplete], TAG, COMMIT, list(READY_ASSETS)
+            )
+
+        missing_digest = ready_release()
+        missing_digest["assets"][0]["digest"] = None
+        with self.assertRaisesRegex(DraftNotReady, "metadata"):
+            verified_ready_draft(
+                [missing_digest], TAG, COMMIT, list(READY_ASSETS)
+            )
+
+    def test_ready_verify_returns_only_a_complete_exact_draft(self) -> None:
+        draft = ready_release()
+        self.assertIs(
+            verified_ready_draft([draft], TAG, COMMIT, list(READY_ASSETS)),
+            draft,
+        )
+
+    def test_ready_verify_does_not_retry_identity_or_provenance_failures(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError) as invalid_commit:
+            verified_ready_draft([], TAG, "not-a-commit", list(READY_ASSETS))
+        self.assertNotIsInstance(invalid_commit.exception, DraftNotReady)
+
+        cases = (
+            [release(TAG, draft=False)],
+            [
+                ready_release(),
+                {**ready_release(), "id": 45},
+            ],
+            [ready_release(target_commitish="b" * 40)],
+        )
+        for releases in cases:
+            with self.subTest(releases=releases):
+                with self.assertRaises(ValueError) as caught:
+                    verified_ready_draft(
+                        releases, TAG, COMMIT, list(READY_ASSETS)
+                    )
+                self.assertNotIsInstance(caught.exception, DraftNotReady)
+
+    def test_ready_verify_rejects_malformed_or_duplicate_asset_names(self) -> None:
+        malformed = ready_release()
+        malformed["assets"][0]["name"] = "../core.so"
+        duplicate = ready_release()
+        duplicate["assets"][1]["name"] = "core.so"
+        for draft in (malformed, duplicate):
+            with self.subTest(draft=draft):
+                with self.assertRaises(ValueError) as caught:
+                    verified_ready_draft(
+                        [draft], TAG, COMMIT, list(READY_ASSETS)
+                    )
+                self.assertNotIsInstance(caught.exception, DraftNotReady)
+
+    def test_ready_verify_rejects_unexpected_valid_asset_without_retry(self) -> None:
+        unexpected = ready_release(assets=READY_ASSETS + ("unexpected.so",))
+        with self.assertRaisesRegex(ValueError, "unexpected asset") as caught:
+            verified_ready_draft(
+                [unexpected], TAG, COMMIT, list(READY_ASSETS)
+            )
+        self.assertNotIsInstance(caught.exception, DraftNotReady)
+
+    def test_verify_ready_cli_uses_a_distinct_transient_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            releases = Path(temporary) / "releases.json"
+            releases.write_text(json.dumps([]), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("release_draft_state.py")),
+                    "verify-ready",
+                    "--releases",
+                    str(releases),
+                    "--tag",
+                    TAG,
+                    "--commit",
+                    COMMIT,
+                    "--expected-asset",
+                    "core.so",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertEqual(DRAFT_NOT_READY_EXIT, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("not visible yet", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_existing_draft_must_already_target_wrapper_commit(self) -> None:
         stale = release(TAG, draft=True, target_commitish="b" * 40)

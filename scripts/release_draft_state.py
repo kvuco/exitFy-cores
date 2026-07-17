@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,13 @@ from typing import Any
 MAX_RELEASES_BYTES = 64 * 1024 * 1024
 MAX_REFERENCES_BYTES = 16 * 1024 * 1024
 FAMILY_PREFIXES = {"sing_box": "sb", "xray": "xray"}
+DRAFT_NOT_READY_EXIT = 75
+ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,254}")
+ASSET_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+class DraftNotReady(ValueError):
+    """A newly-created draft has not fully propagated through the list API."""
 
 
 def _load_json_bounded(path: Path, maximum: int, label: str) -> Any:
@@ -101,6 +109,66 @@ def verified_draft(
         raise ValueError("verified draft is missing")
     drafts, _ = _exact_matches(releases, tag)
     return drafts[0]
+
+
+def _expected_asset_names(values: list[str]) -> frozenset[str]:
+    if not values:
+        raise ValueError("at least one expected asset is required")
+    names: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or ASSET_NAME.fullmatch(value) is None:
+            raise ValueError("expected asset name is invalid")
+        if value in names:
+            raise ValueError("expected asset names are duplicated")
+        names.add(value)
+    return frozenset(names)
+
+
+def verified_ready_draft(
+    releases: list[dict[str, Any]],
+    tag: str,
+    expected_commit: str,
+    expected_assets: list[str],
+) -> dict[str, Any]:
+    expected_names = _expected_asset_names(expected_assets)
+    _require_commit(expected_commit)
+    drafts, published = _exact_matches(releases, tag)
+    if not drafts and not published:
+        raise DraftNotReady("verified draft is not visible yet")
+
+    # Identity and provenance errors are permanent for this run and must not
+    # be hidden behind eventual-consistency retries.
+    draft = verified_draft(releases, tag, expected_commit)
+    assets = draft["assets"]
+    names: set[str] = set()
+    for asset in assets:
+        name = asset.get("name")
+        if not isinstance(name, str) or ASSET_NAME.fullmatch(name) is None:
+            raise ValueError("matching draft contains an invalid asset name")
+        if name in names:
+            raise ValueError("matching draft contains duplicate asset names")
+        names.add(name)
+    if names - expected_names:
+        raise ValueError("matching draft contains an unexpected asset")
+    if names != expected_names:
+        raise DraftNotReady("verified draft asset set is not ready")
+
+    # GitHub may expose the asset entry before size/digest metadata reaches
+    # the paginated releases endpoint. These fields remain mandatory: the
+    # bounded caller retries, and never publishes a draft without them.
+    for asset in assets:
+        size = asset.get("size")
+        digest = asset.get("digest")
+        if (
+            type(size) is not int
+            or size <= 0
+            or not isinstance(digest, str)
+            or ASSET_DIGEST.fullmatch(digest) is None
+        ):
+            raise DraftNotReady(
+                f"verified draft asset metadata is not ready: {asset['name']}"
+            )
+    return draft
 
 
 def next_wrapper_revision(releases: list[dict[str, Any]], prefix: str) -> int:
@@ -233,6 +301,7 @@ def main() -> None:
             "next-revision",
             "prepare",
             "verify",
+            "verify-ready",
             "verify-tag",
         ),
     )
@@ -244,6 +313,7 @@ def main() -> None:
     parser.add_argument("--family", choices=tuple(FAMILY_PREFIXES))
     parser.add_argument("--upstream-tag")
     parser.add_argument("--allow-missing", action="store_true")
+    parser.add_argument("--expected-asset", action="append", default=[])
     args = parser.parse_args()
 
     if args.mode == "verify-tag":
@@ -255,6 +325,7 @@ def main() -> None:
             or args.prefix is not None
             or args.family is not None
             or args.upstream_tag is not None
+            or args.expected_asset
         ):
             parser.error("verify-tag requires --references, --tag and --commit")
         verify_tag_references(
@@ -279,6 +350,7 @@ def main() -> None:
             or args.prefix is not None
             or args.tag is not None
             or args.commit is not None
+            or args.expected_asset
         ):
             parser.error(
                 "guard-upstream requires --family and --upstream-tag only"
@@ -289,7 +361,12 @@ def main() -> None:
     if args.family is not None or args.upstream_tag is not None:
         parser.error(f"{args.mode} does not accept --family or --upstream-tag")
     if args.mode == "next-revision":
-        if args.prefix is None or args.tag is not None or args.commit is not None:
+        if (
+            args.prefix is None
+            or args.tag is not None
+            or args.commit is not None
+            or args.expected_asset
+        ):
             parser.error("next-revision requires --prefix and does not accept --tag")
         print(next_wrapper_revision(releases, args.prefix))
         return
@@ -297,11 +374,24 @@ def main() -> None:
         parser.error(
             f"{args.mode} requires --tag and --commit and does not accept --prefix"
         )
-    value = prepare_plan(releases, args.tag, args.commit) if args.mode == "prepare" else verified_draft(
-        releases, args.tag, args.commit
-    )
+    if args.mode == "prepare":
+        if args.expected_asset:
+            parser.error("prepare does not accept --expected-asset")
+        value = prepare_plan(releases, args.tag, args.commit)
+    elif args.mode == "verify":
+        if args.expected_asset:
+            parser.error("verify does not accept --expected-asset")
+        value = verified_draft(releases, args.tag, args.commit)
+    else:
+        value = verified_ready_draft(
+            releases, args.tag, args.commit, args.expected_asset
+        )
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except DraftNotReady as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(DRAFT_NOT_READY_EXIT) from None

@@ -880,7 +880,9 @@ def _is_generated_output(path: str) -> bool:
     return path.startswith("dist/") or path.startswith("dist-repro/")
 
 
-def _assert_default_index_entries(root: Path | PinnedDirectory) -> None:
+def _assert_default_index_entries(
+    root: Path | PinnedDirectory,
+) -> tuple[tuple[str, str, str, int], ...]:
     output = _git(
         root,
         "ls-files",
@@ -892,6 +894,7 @@ def _assert_default_index_entries(root: Path | PinnedDirectory) -> None:
     )
     offset = 0
     paths: set[str] = set()
+    entries: list[tuple[str, str, str, int]] = []
     while offset < len(output):
         end = output.find(b"\0", offset)
         if end < 0:
@@ -920,6 +923,116 @@ def _assert_default_index_entries(root: Path | PinnedDirectory) -> None:
         if canonical != {path} or path in paths:
             raise ValueError("Git index contains a duplicate or noncanonical path")
         paths.add(path)
+        entries.append(
+            (
+                path,
+                mode.decode("ascii", "strict"),
+                object_id.decode("ascii", "strict"),
+                int(stage),
+            )
+        )
+    return tuple(sorted(entries))
+
+
+@dataclass(frozen=True)
+class _RepositoryStateSnapshot:
+    index_entries: tuple[tuple[str, str, str, int], ...]
+    staged: frozenset[str]
+    unstaged: frozenset[str]
+    untracked: frozenset[str]
+    ignored: frozenset[str]
+
+
+def _scan_repository_state(
+    directory: PinnedDirectory,
+    expected_head: str,
+    allowed: set[str],
+    *,
+    allow_generated: bool,
+) -> _RepositoryStateSnapshot:
+    if _git(directory, "rev-parse", "--shared-index-path").strip():
+        raise ValueError("split Git index is forbidden for release inputs")
+    _require_expected_head(directory, expected_head)
+    index_before = _assert_default_index_entries(directory)
+    staged = _decode_paths(
+        _git(
+            directory,
+            "diff",
+            "--no-ext-diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+        ),
+        "staged changes",
+    )
+    unstaged = _decode_paths(
+        _git(
+            directory,
+            "diff",
+            "--no-ext-diff",
+            "--name-only",
+            "-z",
+            "--",
+        ),
+        "unstaged changes",
+    )
+    if staged:
+        raise ValueError(
+            "unexpected staged build input: " + ", ".join(sorted(staged))
+        )
+    unexpected_tracked = unstaged - allowed
+    if unexpected_tracked:
+        raise ValueError(
+            "unexpected tracked build input: "
+            + ", ".join(sorted(unexpected_tracked))
+        )
+
+    untracked = _decode_paths(
+        _git(directory, "ls-files", "--others", "--exclude-standard", "-z"),
+        "untracked files",
+    )
+    if untracked:
+        raise ValueError(
+            "unexpected untracked build input: " + ", ".join(sorted(untracked))
+        )
+
+    ignored = _decode_paths(
+        _git(
+            directory,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ),
+        "ignored files",
+    )
+    unexpected_ignored = {
+        value
+        for value in ignored
+        if not _is_non_build_ignored(value)
+        and not (allow_generated and _is_generated_output(value))
+    }
+    if unexpected_ignored:
+        raise ValueError(
+            "unexpected ignored build input: "
+            + ", ".join(sorted(unexpected_ignored))
+        )
+    index_after = _assert_default_index_entries(directory)
+    if index_after != index_before:
+        raise ValueError("Git index logical state changed during repository scan")
+    if _git(directory, "rev-parse", "--shared-index-path").strip():
+        raise ValueError("split Git index is forbidden for release inputs")
+    _require_expected_head(directory, expected_head)
+    return _RepositoryStateSnapshot(
+        index_entries=index_after,
+        staged=frozenset(staged),
+        unstaged=frozenset(unstaged),
+        untracked=frozenset(untracked),
+        ignored=frozenset(ignored),
+    )
 
 
 def assert_repository_state(
@@ -938,74 +1051,31 @@ def assert_repository_state(
         git_directory = _pin_relative_directory(
             directory, ".git", "Git metadata directory"
         )
+        # Git may atomically rewrite an otherwise equivalent index merely to
+        # refresh its stat cache. Let one complete logical scan settle that
+        # implementation detail before pinning the physical index. The second
+        # scan must match the first and runs while both the chosen index inode
+        # and its path are pinned, retaining concurrent-mutation detection.
+        settled_state = _scan_repository_state(
+            directory,
+            expected_head,
+            allowed,
+            allow_generated=allow_generated,
+        )
         index_descriptor, index_metadata = _open_relative_regular(
             git_directory, "index", "Git index"
         )
         index_identity = _file_identity(index_metadata)
-        shared_index = _git(directory, "rev-parse", "--shared-index-path")
-        if shared_index.strip():
-            raise ValueError("split Git index is forbidden for release inputs")
-        _require_expected_head(directory, expected_head)
-        _assert_default_index_entries(directory)
-        staged = _decode_paths(
-            _git(
-                directory,
-                "diff",
-                "--no-ext-diff",
-                "--cached",
-                "--name-only",
-                "-z",
-                "HEAD",
-                "--",
-            ),
-            "staged changes",
+        protected_state = _scan_repository_state(
+            directory,
+            expected_head,
+            allowed,
+            allow_generated=allow_generated,
         )
-        unstaged = _decode_paths(
-            _git(directory, "diff", "--no-ext-diff", "--name-only", "-z", "--"),
-            "unstaged changes",
-        )
-        if staged:
+        if protected_state != settled_state:
             raise ValueError(
-                "unexpected staged build input: " + ", ".join(sorted(staged))
+                "repository logical state changed after Git index settlement"
             )
-        unexpected_tracked = unstaged - allowed
-        if unexpected_tracked:
-            raise ValueError(
-                "unexpected tracked build input: " + ", ".join(sorted(unexpected_tracked))
-            )
-
-        untracked = _decode_paths(
-            _git(directory, "ls-files", "--others", "--exclude-standard", "-z"),
-            "untracked files",
-        )
-        if untracked:
-            raise ValueError(
-                "unexpected untracked build input: " + ", ".join(sorted(untracked))
-            )
-
-        ignored = _decode_paths(
-            _git(
-                directory,
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-            ),
-            "ignored files",
-        )
-        unexpected_ignored = {
-            value
-            for value in ignored
-            if not _is_non_build_ignored(value)
-            and not (allow_generated and _is_generated_output(value))
-        }
-        if unexpected_ignored:
-            raise ValueError(
-                "unexpected ignored build input: " + ", ".join(sorted(unexpected_ignored))
-            )
-        _assert_default_index_entries(directory)
-        _require_expected_head(directory, expected_head)
         if _file_identity(os.fstat(index_descriptor)) != index_identity:
             raise ValueError("Git index changed during release input verification")
         reopened_index, reopened_metadata = _open_relative_regular(

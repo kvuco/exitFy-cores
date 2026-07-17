@@ -755,12 +755,39 @@ jobs:
               "$candidate/libexitfy-sb-x86_64.so" \
               "$candidate/manifest.json" \
               "$candidate/$source_name" --clobber
-            ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
-              "$RUNNER_TEMP/releases-after.json"
-            ./scripts/release_draft_state.py verify \
-              --releases "$RUNNER_TEMP/releases-after.json" --tag "$RELEASE_TAG" \
-              --commit "$wrapper_commit" \
-              > "$RUNNER_TEMP/draft.json"
+            draft_ready=false
+            for attempt in 1 2 3 4 5 6; do
+              ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+                "$RUNNER_TEMP/releases-after.json"
+              if ./scripts/release_draft_state.py verify-ready \
+                  --releases "$RUNNER_TEMP/releases-after.json" \
+                  --tag "$RELEASE_TAG" --commit "$wrapper_commit" \
+                  --expected-asset "$source_name" \
+                  --expected-asset libexitfy-sb-arm64-v8a.so \
+                  --expected-asset libexitfy-sb-armeabi-v7a.so \
+                  --expected-asset libexitfy-sb-x86.so \
+                  --expected-asset libexitfy-sb-x86_64.so \
+                  --expected-asset manifest.json \
+                  > "$RUNNER_TEMP/draft.pending.json"; then
+                mv "$RUNNER_TEMP/draft.pending.json" "$RUNNER_TEMP/draft.json"
+                draft_ready=true
+                break
+              else
+                status=$?
+              fi
+              if [[ "$status" -ne 75 ]]; then
+                exit "$status"
+              fi
+              if [[ "$attempt" -lt 6 ]]; then
+                sleep_seconds=$((1 << (attempt - 1)))
+                echo "draft metadata is not visible yet; retrying in ${sleep_seconds}s" >&2
+                sleep "$sleep_seconds"
+              fi
+            done
+            if [[ "$draft_ready" != true ]]; then
+              echo "verified draft did not become ready after six attempts" >&2
+              exit 1
+            fi
             draft_id="$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
             expected="$source_name,libexitfy-sb-arm64-v8a.so,libexitfy-sb-armeabi-v7a.so,libexitfy-sb-x86.so,libexitfy-sb-x86_64.so,manifest.json"
             actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
