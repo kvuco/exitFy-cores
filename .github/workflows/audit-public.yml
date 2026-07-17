@@ -1,0 +1,52 @@
+name: Audit public repository
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-audit-${{ github.workflow }}-${{ github.ref }}
+  # Never cancel an older push audit: the next event's `before` SHA excludes
+  # that older commit, so cancelling it could hide a transient leaked blob.
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Audit exact public Git state and pushed history
+        env:
+          EXITFY_AUDIT_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || github.sha }}
+          EXITFY_AUDIT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXITFY_AUDIT_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          audit_ref="$GITHUB_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            audit_ref="$EXITFY_AUDIT_PR_BASE"
+          fi
+          if [[ ! "$audit_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid frozen audit ref" >&2
+            exit 1
+          fi
+          audit_dir="$(mktemp -d "$RUNNER_TEMP/exitfy-public-audit.XXXXXX")"
+          trap 'rm -rf "$audit_dir"' EXIT
+          chmod 700 "$audit_dir"
+          git show "$audit_ref:scripts/audit_public_tree.py" \
+            > "$audit_dir/audit_public_tree.py"
+          chmod 500 "$audit_dir/audit_public_tree.py"
+          python3 "$audit_dir/audit_public_tree.py" \
+            --repo-root "$GITHUB_WORKSPACE"
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 -m py_compile scripts/*.py
+          bash -n scripts/*.sh

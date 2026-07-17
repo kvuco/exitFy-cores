@@ -1,0 +1,723 @@
+name: Build and release Xray (hardened v2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build a new wrapper revision even when the current one is complete
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 4 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "testdata/**"
+      - "scripts/**"
+      - "go.mod"
+      - "go.sum"
+      - "singbox/go.mod"
+      - "singbox/go.sum"
+      - ".github/workflows/publish-xray-core-v2.yml"
+      - "README.md"
+      - "THIRD_PARTY.md"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: xray-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      build_needed: ${{ steps.resolve.outputs.build_needed }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      go_version: ${{ steps.resolve.outputs.go_version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      snapshot_sha: ${{ steps.pins.outputs.snapshot_sha }}
+      handoff_sha: ${{ steps.handoff.outputs.handoff_sha }}
+    env:
+      NDK_VERSION: 27.2.12479018
+      FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      GOPROXY: direct
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Require retired legacy release workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/retire_legacy_workflows.py --verify
+
+      - name: Audit public repository contents
+        run: |
+          ./scripts/audit_public_tree.py
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Freeze clean wrapper build inputs
+        run: |
+          ./scripts/verify_build_inputs.py preflight --repo . \
+            --expected-head "$GITHUB_SHA"
+
+      - name: Resolve stable upstream and wrapper revision
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./scripts/fetch_github_release_pages.sh XTLS/libXray \
+            "$RUNNER_TEMP/upstream-releases.json"
+          upstream="$(jq -c '
+            [ .[] | select(.draft == false and .prerelease == false)
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | (.tag_name | capture("^v(?<a>[0-9]+)\\.(?<b>[0-9]+)\\.(?<c>[0-9]+)$")
+                 | [(.a|tonumber),(.b|tonumber),(.c|tonumber)]) as $parts
+              | . + {parts:$parts} ] | sort_by(.parts) | last
+          ' "$RUNNER_TEMP/upstream-releases.json")"
+          if [[ -z "$upstream" || "$upstream" == null ]]; then
+            echo "No stable libXray release found" >&2
+            exit 1
+          fi
+          upstream_tag="$(jq -r '.tag_name' <<<"$upstream")"
+          upstream_commit="$(gh api "repos/XTLS/libXray/commits/$upstream_tag" --jq .sha)"
+          if [[ ! "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Resolved libXray commit is invalid" >&2
+            exit 1
+          fi
+          go_mod="$(gh api "repos/XTLS/libXray/contents/go.mod?ref=$upstream_commit" \
+            --jq .content | base64 --decode)"
+          go_version="$(awk '$1 == "go" { print $2; exit }' <<<"$go_mod")"
+          if [[ ! "$go_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Unsupported Go version: $go_version" >&2
+            exit 1
+          fi
+
+          ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/core-releases.json"
+          ./scripts/release_draft_state.py guard-upstream \
+            --releases "$RUNNER_TEMP/core-releases.json" \
+            --family xray --upstream-tag "$upstream_tag"
+          prefix="xray-$upstream_tag-w"
+          revision="$(./scripts/release_draft_state.py next-revision \
+            --releases "$RUNNER_TEMP/core-releases.json" --prefix "$prefix")"
+          current=false
+          candidate="$(jq -c --arg prefix "$prefix" '
+            [ .[] | select(.draft == false and .prerelease == false)
+              | select(.tag_name | startswith($prefix))
+              | . + {wrapperRevision:
+                  (try (.tag_name | capture("-w(?<n>[0-9]+)$").n | tonumber)
+                   catch -1)} ]
+            | sort_by(.wrapperRevision) | last // empty
+          ' "$RUNNER_TEMP/core-releases.json")"
+          if [[ -n "$candidate" && "$candidate" != null ]]; then
+            printf '%s\n' "$candidate" > "$RUNNER_TEMP/current-release.json"
+            manifest_id="$(jq -r '[.assets[] | select(.name == "manifest.json") | .id] | if length == 1 then .[0] else "" end' \
+              "$RUNNER_TEMP/current-release.json")"
+            manifest_size="$(jq -r '[.assets[] | select(.name == "manifest.json") | .size] | if length == 1 then .[0] else "" end' \
+              "$RUNNER_TEMP/current-release.json")"
+            if [[ "$manifest_id" =~ ^[1-9][0-9]*$ && \
+              "$manifest_size" =~ ^[1-9][0-9]*$ && \
+              "$manifest_size" -le 1048576 ]]; then
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$manifest_id" \
+                > "$RUNNER_TEMP/current-manifest.json"
+              current_tag="$(jq -r .tag_name "$RUNNER_TEMP/current-release.json")"
+              ./scripts/release_head_state.py --repo . --head "$GITHUB_SHA" \
+                --foreign-pin singbox/go.mod --foreign-pin singbox/go.sum \
+                > "$RUNNER_TEMP/current-wrapper-candidates"
+              gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$current_tag?per_page=100" \
+                > "$RUNNER_TEMP/current-tag.json"
+              while IFS= read -r current_wrapper; do
+                if ./scripts/verify_remote_release.py --family xray \
+                  --release "$RUNNER_TEMP/current-release.json" \
+                  --manifest "$RUNNER_TEMP/current-manifest.json" \
+                  --upstream-commit "$upstream_commit" \
+                  --wrapper-commit "$current_wrapper" && \
+                  ./scripts/release_draft_state.py verify-tag \
+                    --references "$RUNNER_TEMP/current-tag.json" \
+                    --tag "$current_tag" --commit "$current_wrapper"; then
+                  current=true
+                  break
+                fi
+              done < "$RUNNER_TEMP/current-wrapper-candidates"
+            fi
+          fi
+
+          build_needed=true
+          if [[ "$current" == true && "$FORCE_REBUILD" != true ]]; then
+            build_needed=false
+          fi
+          release_tag="xray-$upstream_tag-w$revision"
+          {
+            echo "build_needed=$build_needed"
+            echo "upstream_tag=$upstream_tag"
+            echo "upstream_commit=$upstream_commit"
+            echo "go_version=$go_version"
+            echo "release_tag=$release_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ steps.resolve.outputs.go_version }}
+          cache: false
+
+      - name: Set up Android SDK
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+
+      - name: Isolate direct Go module downloads
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/exitfy-go-mod-cache"
+          echo "GOMODCACHE=$RUNNER_TEMP/exitfy-go-mod-cache" >> "$GITHUB_ENV"
+
+      - name: Install Android NDK
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: sdkmanager "ndk;$NDK_VERSION"
+
+      - name: Pin exact libXray commit and capture provenance
+        id: pins
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+          go get "github.com/xtls/libxray@${{ steps.resolve.outputs.upstream_commit }}"
+          go mod tidy
+          snapshot_sha="$(./scripts/verify_build_inputs.py capture \
+            --repo . --module-dir . \
+            --module-path github.com/xtls/libxray \
+            --commit "${{ steps.resolve.outputs.upstream_commit }}" \
+            --expected-head "$GITHUB_SHA" \
+            --snapshot "$RUNNER_TEMP/xray-pin-snapshot" \
+            --pin go.mod --pin go.sum)"
+          if [[ ! "$snapshot_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "pin snapshot digest is invalid" >&2
+            exit 1
+          fi
+          echo "snapshot_sha=$snapshot_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Test Xray adapter against frozen pins
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+          go test ./...
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_build_inputs.py" \
+            | /usr/bin/python3 - verify --repo . \
+            --expected-head "$GITHUB_SHA" \
+            --snapshot "$RUNNER_TEMP/xray-pin-snapshot" \
+            --snapshot-sha256 "${{ steps.pins.outputs.snapshot_sha }}" \
+            --pin go.mod --pin go.sum
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_build_inputs.py" \
+            | /usr/bin/python3 - verify-module-cache --repo . \
+            --module-dir . --expected-head "$GITHUB_SHA" \
+            --pin go.mod --pin go.sum
+
+      - name: Build and verify four ABIs twice
+        if: steps.resolve.outputs.build_needed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/xray-repro-cache-a" \
+            "$RUNNER_TEMP/xray-repro-tmp-a" \
+            "$RUNNER_TEMP/xray-repro-cache-b" \
+            "$RUNNER_TEMP/xray-repro-tmp-b"
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_build_inputs.py" \
+            | /usr/bin/python3 - verify-module-cache --repo . \
+            --module-dir . --expected-head "$GITHUB_SHA" \
+            --pin go.mod --pin go.sum
+          GOCACHE="$RUNNER_TEMP/xray-repro-cache-a" \
+            GOTMPDIR="$RUNNER_TEMP/xray-repro-tmp-a" \
+            ./scripts/build_android.sh dist
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_build_inputs.py" \
+            | /usr/bin/python3 - verify-module-cache --repo . \
+            --module-dir . --expected-head "$GITHUB_SHA" \
+            --pin go.mod --pin go.sum --allow-generated
+          GOCACHE="$RUNNER_TEMP/xray-repro-cache-b" \
+            GOTMPDIR="$RUNNER_TEMP/xray-repro-tmp-b" \
+            ./scripts/build_android.sh dist-repro
+          ./scripts/verify_artifacts.py dist
+          ./scripts/verify_artifacts.py dist-repro
+          for artifact in dist/libxray-*.so; do
+            cmp "$artifact" "dist-repro/${artifact#dist/}"
+          done
+
+      - name: Enable KVM
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke-test ABI 2 on Android API 26
+        if: steps.resolve.outputs.build_needed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: ./scripts/with_api26_emulator.sh ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
+
+      - name: Verify final core bytes and freeze attestation
+        id: core_attestation
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+          attestation_sha="$(/usr/bin/git -c core.fsmonitor=false \
+            -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_artifacts.py" \
+            | /usr/bin/python3 - dist --family xray \
+            --attestation "$RUNNER_TEMP/xray-core-attestation.json" \
+            --print-attestation-sha256)"
+          if [[ ! "$attestation_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "core attestation digest is invalid" >&2
+            exit 1
+          fi
+          echo "sha256=$attestation_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Re-audit before handoff to publisher
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/audit_public_tree.py" \
+            | /usr/bin/python3 - --repo-root "$GITHUB_WORKSPACE"
+
+      - name: Re-verify build inputs and frozen pin snapshot
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/verify_build_inputs.py" \
+            | /usr/bin/python3 - verify --repo . \
+            --expected-head "$GITHUB_SHA" \
+            --snapshot "$RUNNER_TEMP/xray-pin-snapshot" \
+            --snapshot-sha256 "${{ steps.pins.outputs.snapshot_sha }}" \
+            --pin go.mod --pin go.sum --allow-generated
+
+      - name: Create immutable candidate handoff
+        id: handoff
+        if: steps.resolve.outputs.build_needed == 'true'
+        run: |
+          set -euo pipefail
+          handoff_sha="$(/usr/bin/git -c core.fsmonitor=false \
+            -c core.hooksPath=/dev/null \
+            show "$GITHUB_SHA:scripts/candidate_handoff.py" \
+            | /usr/bin/python3 - create --family xray \
+            --event-commit "$GITHUB_SHA" \
+            --upstream-tag "${{ steps.resolve.outputs.upstream_tag }}" \
+            --upstream-commit "${{ steps.resolve.outputs.upstream_commit }}" \
+            --go-version "${{ steps.resolve.outputs.go_version }}" \
+            --release-tag "${{ steps.resolve.outputs.release_tag }}" \
+            --snapshot-sha256 "${{ steps.pins.outputs.snapshot_sha }}" \
+            --artifacts dist --snapshot "$RUNNER_TEMP/xray-pin-snapshot" \
+            --core-attestation "$RUNNER_TEMP/xray-core-attestation.json" \
+            --core-attestation-sha256 \
+            "${{ steps.core_attestation.outputs.sha256 }}" \
+            --output "$RUNNER_TEMP/candidate")"
+          if [[ ! "$handoff_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "candidate handoff digest is invalid" >&2
+            exit 1
+          fi
+          echo "handoff_sha=$handoff_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified candidate
+        if: steps.resolve.outputs.build_needed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: xray-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: >-
+      needs.build.outputs.build_needed == 'true' &&
+      (github.event_name != 'workflow_dispatch' ||
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: exitfy-cores-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+      UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+      UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+      GO_VERSION: ${{ needs.build.outputs.go_version }}
+      SNAPSHOT_SHA: ${{ needs.build.outputs.snapshot_sha }}
+      HANDOFF_SHA: ${{ needs.build.outputs.handoff_sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Download verified candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: xray-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Validate frozen publish head before local code
+        id: frozen
+        shell: bash
+        run: |
+          set -euo pipefail
+          event_commit="$GITHUB_SHA"
+          if [[ ! "$event_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "workflow event commit is invalid" >&2
+            exit 1
+          fi
+          handoff="$RUNNER_TEMP/candidate/candidate-handoff.json"
+          if [[ ! "$HANDOFF_SHA" =~ ^[0-9a-f]{64}$ || \
+            ! -f "$handoff" || -L "$handoff" ]]; then
+            echo "candidate handoff is not a regular file" >&2
+            exit 1
+          fi
+          handoff_size="$(wc -c < "$handoff")"
+          if [[ \
+            ! "$handoff_size" =~ ^[[:space:]]*[1-9][0-9]*[[:space:]]*$ || \
+            "$handoff_size" -gt 1048576 || \
+            "$(sha256sum "$handoff" | awk '{print $1}')" != "$HANDOFF_SHA" ]]; then
+            echo "candidate handoff does not match the immutable build output" >&2
+            exit 1
+          fi
+          for pin in go.mod go.sum; do
+            candidate="$RUNNER_TEMP/candidate/pin-snapshot/$pin"
+            if [[ ! -f "$candidate" || -L "$candidate" ]]; then
+              echo "candidate pin is not a regular file: $pin" >&2
+              exit 1
+            fi
+            size="$(wc -c < "$candidate")"
+            if [[ ! "$size" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || \
+              (( size > 16777216 )); then
+              echo "candidate pin has an invalid size: $pin" >&2
+              exit 1
+            fi
+          done
+          git fetch --no-tags --force origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          head="$(git rev-parse --verify refs/remotes/origin/main^{commit})"
+          if [[ "$head" != "$event_commit" ]]; then
+            distance="$(git rev-list --count "$event_commit..$head")"
+            parent="$(git rev-parse "$head^")"
+            if [[ "$distance" != 1 || "$parent" != "$event_commit" ]]; then
+              echo "main is not one direct child of the workflow event" >&2
+              exit 1
+            fi
+            own_count=0
+            foreign_count=0
+            changed_file="$RUNNER_TEMP/frozen-head-changes"
+            if ! git diff --no-ext-diff --name-status --no-renames -z \
+              "$event_commit" "$head" -- > "$changed_file"; then
+              echo "cannot enumerate the publish-head change" >&2
+              exit 1
+            fi
+            while IFS= read -r -d '' status && IFS= read -r -d '' changed; do
+              if [[ "$status" != M || \
+                "$(git ls-tree "$event_commit" -- "$changed" | awk '{print $1}')" != 100644 || \
+                "$(git ls-tree "$head" -- "$changed" | awk '{print $1}')" != 100644 ]]; then
+                echo "publish-head pin changes must be M-only regular files: $changed" >&2
+                exit 1
+              fi
+              case "$changed" in
+                go.mod|go.sum) own_count=$((own_count + 1)) ;;
+                singbox/go.mod|singbox/go.sum) foreign_count=$((foreign_count + 1)) ;;
+                *) echo "main changed outside the Xray pin: $changed" >&2; exit 1 ;;
+              esac
+            done < "$changed_file"
+            if (( own_count + foreign_count == 0 || \
+              (own_count > 0 && foreign_count > 0) )); then
+              echo "direct child must change exactly one core family's pins" >&2
+              exit 1
+            fi
+            if (( own_count > 0 )); then
+              if ! mkdir "$RUNNER_TEMP/frozen-head-pins"; then
+                echo "cannot create frozen pin directory" >&2
+                exit 1
+              fi
+              for pin in go.mod go.sum; do
+                if ! git show "$head:$pin" > "$RUNNER_TEMP/frozen-head-pins/$pin" || \
+                  ! cmp "$RUNNER_TEMP/frozen-head-pins/$pin" \
+                    "$RUNNER_TEMP/candidate/pin-snapshot/$pin"; then
+                  echo "direct-child Xray pin differs from the candidate: $pin" >&2
+                  exit 1
+                fi
+              done
+            fi
+          fi
+          git checkout --detach "$head"
+          if [[ "$(git rev-parse HEAD)" != "$head" ]]; then
+            echo "failed to freeze the validated publish head" >&2
+            exit 1
+          fi
+          echo "commit=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable candidate handoff
+        run: |
+          ./scripts/candidate_handoff.py verify \
+            --directory "$RUNNER_TEMP/candidate" \
+            --expected-sha256 "$HANDOFF_SHA" --family xray \
+            --event-commit "$GITHUB_SHA" --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" --go-version "$GO_VERSION" \
+            --release-tag "$RELEASE_TAG" --snapshot-sha256 "$SNAPSHOT_SHA"
+
+      - name: Require retired legacy release workflows
+        run: ./scripts/retire_legacy_workflows.py --verify
+
+      - name: Commit exact frozen Xray pin
+        id: wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "${{ steps.frozen.outputs.commit }}" ]]; then
+            echo "validated publish head changed before the pin commit" >&2
+            exit 1
+          fi
+          ./scripts/candidate_handoff.py verify \
+            --directory "$RUNNER_TEMP/candidate" \
+            --expected-sha256 "$HANDOFF_SHA" --family xray \
+            --event-commit "$GITHUB_SHA" --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" --go-version "$GO_VERSION" \
+            --release-tag "$RELEASE_TAG" --snapshot-sha256 "$SNAPSHOT_SHA"
+          cp "$RUNNER_TEMP/candidate/pin-snapshot/go.mod" go.mod
+          cp "$RUNNER_TEMP/candidate/pin-snapshot/go.sum" go.sum
+          cmp "$RUNNER_TEMP/candidate/pin-snapshot/go.mod" go.mod
+          cmp "$RUNNER_TEMP/candidate/pin-snapshot/go.sum" go.sum
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add go.mod go.sum
+          if ! git diff --cached --quiet; then
+            while IFS= read -r changed; do
+              case "$changed" in go.mod|go.sum) ;; *) exit 1 ;; esac
+            done < <(git diff --cached --name-only)
+            git commit -m "Pin libXray $UPSTREAM_TAG"
+            ./scripts/audit_public_tree.py
+            git push origin HEAD:main
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and verify final manifest
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          ./scripts/generate_manifest.py \
+            --directory "$candidate" \
+            --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --wrapper-commit "${{ steps.wrapper.outputs.commit }}" \
+            --release-tag "$RELEASE_TAG" \
+            --output "$candidate/manifest.json"
+          ./scripts/verify_manifest.py "$candidate/manifest.json" "$candidate"
+          ./scripts/candidate_handoff.py verify \
+            --directory "$candidate" --expected-sha256 "$HANDOFF_SHA" \
+            --family xray --event-commit "$GITHUB_SHA" \
+            --upstream-tag "$UPSTREAM_TAG" --upstream-commit "$UPSTREAM_COMMIT" \
+            --go-version "$GO_VERSION" --release-tag "$RELEASE_TAG" \
+            --snapshot-sha256 "$SNAPSHOT_SHA" --allow-final-manifest
+          ./scripts/audit_public_tree.py
+
+      - name: Re-verify legacy workflow retirement before release mutation
+        run: ./scripts/retire_legacy_workflows.py --verify
+
+      - name: Confirm main still equals the wrapper commit
+        run: |
+          git fetch --no-tags --force origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          if [[ "$(git rev-parse refs/remotes/origin/main^{commit})" != \
+            "${{ steps.wrapper.outputs.commit }}" ]]; then
+            echo "main changed after the wrapper pin was selected" >&2
+            exit 1
+          fi
+
+      - name: Create verified draft and publish atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          wrapper_commit="${{ steps.wrapper.outputs.commit }}"
+          release_title="Xray $UPSTREAM_TAG · core ABI 2"
+          release_notes="Independent exitFy build from XTLS/libXray $UPSTREAM_TAG ($UPSTREAM_COMMIT). Android API 26+, manifest schema 2, core API 2, config contract 1."
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG?per_page=100" \
+            > "$RUNNER_TEMP/tag-before.json"
+          ./scripts/release_draft_state.py verify-tag \
+            --references "$RUNNER_TEMP/tag-before.json" --tag "$RELEASE_TAG" \
+            --commit "$wrapper_commit" --allow-missing
+          ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/releases-before.json"
+          exact_count="$(jq --arg tag "$RELEASE_TAG" \
+            '[.[] | select(.tag_name == $tag)] | length' \
+            "$RUNNER_TEMP/releases-before.json")"
+          public_count="$(jq --arg tag "$RELEASE_TAG" \
+            '[.[] | select(.tag_name == $tag and .draft == false)] | length' \
+            "$RUNNER_TEMP/releases-before.json")"
+          if [[ "$public_count" == 1 ]]; then
+            if [[ "$exact_count" != 1 ]]; then
+              echo "exact public release identity is ambiguous" >&2
+              exit 1
+            fi
+            jq --arg tag "$RELEASE_TAG" \
+              '[.[] | select(.tag_name == $tag and .draft == false)][0]' \
+              "$RUNNER_TEMP/releases-before.json" \
+              > "$RUNNER_TEMP/public-recovery.json"
+            manifest_ids="$(jq -r \
+              '[.assets[] | select(.name == "manifest.json") | .id] | join(" ")' \
+              "$RUNNER_TEMP/public-recovery.json")"
+            manifest_size="$(jq -r \
+              '[.assets[] | select(.name == "manifest.json") | .size] | if length == 1 then .[0] else "" end' \
+              "$RUNNER_TEMP/public-recovery.json")"
+            if [[ ! "$manifest_ids" =~ ^[1-9][0-9]*$ || \
+              ! "$manifest_size" =~ ^[1-9][0-9]*$ || \
+              "$manifest_size" -gt 1048576 ]]; then
+              echo "published manifest asset identity is ambiguous" >&2
+              exit 1
+            fi
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$manifest_ids" \
+              > "$RUNNER_TEMP/public-recovery-manifest.json"
+            ./scripts/verify_published_candidate.py --family xray \
+              --candidate "$candidate" \
+              --release "$RUNNER_TEMP/public-recovery.json" \
+              --references "$RUNNER_TEMP/tag-before.json" \
+              --remote-manifest "$RUNNER_TEMP/public-recovery-manifest.json" \
+              --handoff-sha256 "$HANDOFF_SHA" --event-commit "$GITHUB_SHA" \
+              --upstream-tag "$UPSTREAM_TAG" \
+              --upstream-commit "$UPSTREAM_COMMIT" --go-version "$GO_VERSION" \
+              --release-tag "$RELEASE_TAG" --snapshot-sha256 "$SNAPSHOT_SHA" \
+              --wrapper-commit "$wrapper_commit"
+            cp "$RUNNER_TEMP/public-recovery.json" "$RUNNER_TEMP/published.json"
+          else
+            if [[ "$public_count" != 0 ]]; then
+              echo "exact public release identity is ambiguous" >&2
+              exit 1
+            fi
+            ./scripts/release_draft_state.py prepare \
+              --releases "$RUNNER_TEMP/releases-before.json" --tag "$RELEASE_TAG" \
+              --commit "$wrapper_commit" \
+              > "$RUNNER_TEMP/draft-plan.json"
+            if [[ "$(jq -r .create "$RUNNER_TEMP/draft-plan.json")" == true ]]; then
+              gh release create "$RELEASE_TAG" --draft \
+                --target "$wrapper_commit" --title "$release_title" \
+                --notes "$release_notes"
+            else
+              draft_id="$(jq -r .draftId "$RUNNER_TEMP/draft-plan.json")"
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
+                -f name="$release_title" \
+                -f body="$release_notes" -F draft=true -F prerelease=false \
+                > "$RUNNER_TEMP/reconciled-draft.json"
+              jq -e --arg tag "$RELEASE_TAG" --arg commit "$wrapper_commit" \
+                '.tag_name == $tag and .target_commitish == $commit
+                 and .draft == true and .prerelease == false' \
+                "$RUNNER_TEMP/reconciled-draft.json" >/dev/null
+              while IFS= read -r asset_id; do
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              done < <(jq -r '.assetIds[]' "$RUNNER_TEMP/draft-plan.json")
+            fi
+            gh release upload "$RELEASE_TAG" \
+              "$candidate/libxray-arm64-v8a.so" \
+              "$candidate/libxray-armeabi-v7a.so" \
+              "$candidate/libxray-x86.so" \
+              "$candidate/libxray-x86_64.so" \
+              "$candidate/manifest.json" --clobber
+            ./scripts/fetch_github_release_pages.sh "$GITHUB_REPOSITORY" \
+              "$RUNNER_TEMP/releases-after.json"
+            ./scripts/release_draft_state.py verify \
+              --releases "$RUNNER_TEMP/releases-after.json" --tag "$RELEASE_TAG" \
+              --commit "$wrapper_commit" \
+              > "$RUNNER_TEMP/draft.json"
+            draft_id="$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
+            expected="libxray-arm64-v8a.so,libxray-armeabi-v7a.so,libxray-x86.so,libxray-x86_64.so,manifest.json"
+            actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "draft asset set is incomplete or unexpected" >&2
+              exit 1
+            fi
+            ./scripts/verify_remote_release.py --family xray --allow-draft \
+              --release "$RUNNER_TEMP/draft.json" \
+              --manifest "$candidate/manifest.json" \
+              --upstream-commit "$UPSTREAM_COMMIT" \
+              --wrapper-commit "$wrapper_commit"
+            while IFS=$'\t' read -r name digest; do
+              local_digest="sha256:$(sha256sum "$candidate/$name" | awk '{print $1}')"
+              if [[ "$digest" != "$local_digest" ]]; then
+                echo "GitHub asset digest differs from the verified candidate: $name" >&2
+                exit 1
+              fi
+            done < <(jq -r '.assets[] | [.name, .digest] | @tsv' "$RUNNER_TEMP/draft.json")
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
+              -F draft=false -f make_latest=false \
+              > "$RUNNER_TEMP/publish-response.json"
+            jq -e --arg tag "$RELEASE_TAG" \
+              '.tag_name == $tag and .draft == false' \
+              "$RUNNER_TEMP/publish-response.json" >/dev/null
+            gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" \
+              > "$RUNNER_TEMP/published.json"
+          fi
+          published_id="$(jq -r '.id // ""' "$RUNNER_TEMP/published.json")"
+          if [[ ! "$published_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "published release id is invalid" >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/$published_id" \
+            > "$RUNNER_TEMP/published-live.json"
+          mv "$RUNNER_TEMP/published-live.json" "$RUNNER_TEMP/published.json"
+          live_manifest_id="$(jq -r '[.assets[] | select(.name == "manifest.json") | .id] | if length == 1 then .[0] else "" end' \
+            "$RUNNER_TEMP/published.json")"
+          live_manifest_size="$(jq -r '[.assets[] | select(.name == "manifest.json") | .size] | if length == 1 then .[0] else "" end' \
+            "$RUNNER_TEMP/published.json")"
+          if [[ ! "$live_manifest_id" =~ ^[1-9][0-9]*$ || \
+            ! "$live_manifest_size" =~ ^[1-9][0-9]*$ || \
+            "$live_manifest_size" -gt 1048576 ]]; then
+            echo "live published manifest identity is invalid" >&2
+            exit 1
+          fi
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$live_manifest_id" \
+            > "$RUNNER_TEMP/published-live-manifest.json"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG?per_page=100" \
+            > "$RUNNER_TEMP/tag-after.json"
+          ./scripts/release_draft_state.py verify-tag \
+            --references "$RUNNER_TEMP/tag-after.json" --tag "$RELEASE_TAG" \
+            --commit "$wrapper_commit"
+          ./scripts/verify_published_candidate.py --family xray \
+            --candidate "$candidate" --release "$RUNNER_TEMP/published.json" \
+            --references "$RUNNER_TEMP/tag-after.json" \
+            --remote-manifest "$RUNNER_TEMP/published-live-manifest.json" \
+            --handoff-sha256 "$HANDOFF_SHA" --event-commit "$GITHUB_SHA" \
+            --upstream-tag "$UPSTREAM_TAG" --upstream-commit "$UPSTREAM_COMMIT" \
+            --go-version "$GO_VERSION" --release-tag "$RELEASE_TAG" \
+            --snapshot-sha256 "$SNAPSHOT_SHA" --wrapper-commit "$wrapper_commit"
+          ./scripts/verify_remote_release.py --family xray \
+            --release "$RUNNER_TEMP/published.json" \
+            --manifest "$candidate/manifest.json" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --wrapper-commit "$wrapper_commit"

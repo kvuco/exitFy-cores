@@ -52,11 +52,9 @@ for config in "$repo_root"/singbox/testdata/*.json; do
   name="$(basename "$config")"
   adb "${adb_args[@]}" push "$config" "/data/local/tmp/exitfy-sb-smoke/$name"
   if [[ "$name" == unsupported-* ]]; then
-    if adb "${adb_args[@]}" shell /data/local/tmp/exitfy-sb-smoke/runner \
-      /data/local/tmp/exitfy-sb-smoke/core.so "/data/local/tmp/exitfy-sb-smoke/$name"; then
-      echo "unsupported fixture was accepted: $name" >&2
-      exit 1
-    fi
+    adb "${adb_args[@]}" shell /data/local/tmp/exitfy-sb-smoke/runner \
+      /data/local/tmp/exitfy-sb-smoke/core.so \
+      "/data/local/tmp/exitfy-sb-smoke/$name" expect-start-error
   else
     adb "${adb_args[@]}" shell /data/local/tmp/exitfy-sb-smoke/runner \
       /data/local/tmp/exitfy-sb-smoke/core.so "/data/local/tmp/exitfy-sb-smoke/$name"

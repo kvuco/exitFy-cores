@@ -8,6 +8,8 @@
 typedef char *(*start_core_fn)(const char *);
 typedef char *(*stop_core_fn)(void);
 
+#define MAX_ERROR_BYTES 4096U
+
 static char *read_config(const char *path) {
     FILE *source = fopen(path, "rb");
     if (source == NULL) return NULL;
@@ -30,9 +32,37 @@ static char *read_config(const char *path) {
     return value;
 }
 
+static int report_error(const char *label, char *error) {
+    size_t length = 0U;
+    while (length <= MAX_ERROR_BYTES && error[length] != '\0') length++;
+    if (length == 0U || length > MAX_ERROR_BYTES) {
+        fprintf(stderr, "%s returned an invalid or oversized error\n", label);
+        free(error);
+        return 0;
+    }
+    fprintf(stderr, "%s: %.*s\n", label, (int) length, error);
+    free(error);
+    return 1;
+}
+
+static int stop_twice(stop_core_fn stop) {
+    char *error = stop();
+    if (error != NULL) {
+        report_error("StopCore failed", error);
+        return 0;
+    }
+    error = stop();
+    if (error != NULL) {
+        report_error("repeated StopCore failed", error);
+        return 0;
+    }
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s CORE CONFIG\n", argv[0]);
+    int expect_start_error = argc == 4 && strcmp(argv[3], "expect-start-error") == 0;
+    if (argc != 3 && !expect_start_error) {
+        fprintf(stderr, "usage: %s CORE CONFIG [expect-start-error]\n", argv[0]);
         return 2;
     }
     char *config = read_config(argv[2]);
@@ -59,24 +89,27 @@ int main(int argc, char **argv) {
     }
     char *error = start(config);
     free(config);
+    if (expect_start_error) {
+        if (error == NULL) {
+            fprintf(stderr, "StartCore unexpectedly accepted an invalid config\n");
+            stop_twice(stop);
+            return 6;
+        }
+        if (!report_error("StartCore rejected invalid config", error)) {
+            stop_twice(stop);
+            return 7;
+        }
+        if (!stop_twice(stop)) return 8;
+        puts("Android expected-error and repeated StopCore smoke test passed");
+        return 0;
+    }
     if (error != NULL) {
-        fprintf(stderr, "StartCore failed: %s\n", error);
-        free(error);
+        report_error("StartCore failed", error);
+        stop_twice(stop);
         return 6;
     }
     usleep(250000U);
-    error = stop();
-    if (error != NULL) {
-        fprintf(stderr, "StopCore failed: %s\n", error);
-        free(error);
-        return 7;
-    }
-    error = stop();
-    if (error != NULL) {
-        fprintf(stderr, "repeated StopCore failed: %s\n", error);
-        free(error);
-        return 8;
-    }
+    if (!stop_twice(stop)) return 7;
     puts("Android StartCore/StopCore smoke test passed");
     return 0;
 }

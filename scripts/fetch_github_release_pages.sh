@@ -37,8 +37,8 @@ for page in $(seq 1 100); do
   fi
 
   page_size="$(jq 'length' "$page_file")"
-  jq '[.[] | {tag_name, draft, prerelease,
-        assets: [.assets[] | {id, name}]}]' "$page_file" > "$filtered_file"
+  jq '[.[] | {id, tag_name, target_commitish, draft, prerelease,
+        assets: [.assets[] | {id, name, size, digest}]}]' "$page_file" > "$filtered_file"
   jq -s '.[0] + .[1]' "$temporary" "$filtered_file" > "$merged_file"
   mv "$merged_file" "$temporary"
   if [[ "$page_size" -lt 100 ]]; then

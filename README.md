@@ -55,8 +55,68 @@ replacing the `.so`, manifest, and advertised digest together.
 Workflow build/test jobs are read-only. A separate serialized publisher has
 the minimal `contents: write` permission, records exact module pins, creates a
 draft, verifies the complete asset set and GitHub digests, and only then makes
-the release public. Every external Action is pinned to a full commit SHA; the
-API 26 emulator is launched by the repository's own shell runner.
+the release public. Publisher-only reruns empty and reuse their exact draft,
+retarget it to the same verified wrapper commit, and check both the draft target
+and final Git tag against that commit. A later workflow run treats every
+existing exact draft revision as reserved and advances to the next `wN`, so it
+never retargets an older draft's provenance. Every external Action is pinned to
+a full commit SHA; the API 26 emulator is launched by the repository's own
+shell runner.
+
+The hardened publishers live at unique v2 workflow paths. A job-level guard
+rejects `workflow_dispatch` from anything except the default branch before a
+runner or Action starts. Candidate artifact names are stable for the workflow
+run, so both a full rerun and a failed-publisher-only rerun consume the same
+verified candidate.
+
+### One-time legacy workflow retirement
+
+The former release workflow identities had rerunnable runs created before the
+full-SHA Action policy. Removing their files from the default branch blocks
+new manual dispatches, but completed runs can remain rerunnable for up to 30
+days. Retirement therefore happens in two phases. Do not push the workflow-path
+migration until the pre-migration phase below has succeeded.
+
+While the default branch still contains the two legacy paths, generate a
+read-only plan from this hardened worktree:
+
+    ./scripts/retire_legacy_workflows.py
+
+The plan discovers the legacy workflow IDs from their exact paths; IDs are
+never assumed from documentation. Every `gh api` call is explicitly pinned to
+`github.com`, regardless of `GH_HOST`; the host is shown in the plan and bound
+into the token. The plan lists every run and prints a
+snapshot-bound `applyToken`. If any run is not completed, cancel it and
+generate a new plan. After explicit operator approval of the listed workflow
+and run IDs, copy that exact token into:
+
+    ./scripts/retire_legacy_workflows.py --apply-token 'RETIRE-LEGACY-EXITFY-WORKFLOWS:...'
+
+Apply mode requires the old paths to remain on the default branch. It disables
+only the two runtime-resolved workflow IDs, deletes only their approved
+completed run IDs, verifies the live disabled/empty state, and atomically writes
+`.github/legacy-workflow-retirement.json`. The tracked receipt contains only
+the GitHub host, repository, default branch, exact paths and captured IDs,
+schema, and the zero-run proof; it contains no token, actor, commit, or local path. A partial
+failure is recoverable by generating a fresh plan and token; a fully completed
+rerun is idempotent and rewrites the same proof.
+
+Review the receipt, then include it in the same push that removes the legacy
+paths and adds both hardened v2 paths. After GitHub registers the replacements,
+run the post-migration proof:
+
+    ./scripts/retire_legacy_workflows.py --verify
+
+Post-migration verification requires both replacement workflows to be active,
+the old paths to be absent, and the repository-wide run list to contain no run
+for either captured ID or legacy path. If GitHub still exposes a captured
+legacy identity it must also remain `disabled_manually` with zero runs; if the
+deleted identity is no longer listed, the captured IDs and global run check
+avoid depending on undocumented retention behavior. The tool never modifies a
+tag or Release. Run deletion is intentionally irreversible and requires the
+explicit approval above. Both hardened publishers run the same live proof
+before building, before any pin commit/push, and immediately before Release
+mutation.
 
 ## Local build
 
@@ -74,16 +134,31 @@ For the separate SB module, use the Go version declared in `singbox/go.mod`:
     (cd singbox && go test -tags 'with_quic,with_utls,badlinkname,tfogo_checklinkname0' ./...)
     ./scripts/build_singbox_android.sh dist
     ./scripts/verify_singbox_artifacts.py dist
-    ./scripts/build_singbox_source_bundle.py --upstream-version v1.13.14 \
+    expected_head="$(git rev-parse HEAD)"
+    pin_mod_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' singbox/go.mod)"
+    pin_sum_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' singbox/go.sum)"
+    ./scripts/build_singbox_source_bundle.py --repo-root "$PWD" \
+      --expected-head "$expected_head" \
+      --expected-pin-sha256 "singbox/go.mod=$pin_mod_sha" \
+      --expected-pin-sha256 "singbox/go.sum=$pin_sum_sha" \
+      --upstream-version v1.13.14 \
       --output dist/exitfy-sb-v1.13.14-source.tar.gz
 
 With a matching Android device or emulator connected, run:
 
     ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
 
-The public-tree audit examines tracked and untracked publishable files. It
-rejects packaged client artifacts, client implementation namespaces, local
-home paths, and unapproved binaries before repository pushes or releases.
+The public-tree audit examines the exact `HEAD` blobs, staged/index blobs,
+working and untracked files, and every commit in the unpushed range. It rejects
+symlinks instead of following them, and rejects packaged client artifacts,
+client implementation namespaces, local host paths, and unapproved binaries.
+External `uses:` references are checked in workflows and nested local
+`action.yml`/`action.yaml` metadata, including YAML flow-style mappings.
+Run it locally immediately before every push. The read-only `audit-public`
+workflow runs without path filters on every push and pull request, but a check
+that starts after a direct push can only detect a leak after it reached GitHub;
+preventing such pushes requires the local audit plus branch protection that
+requires the workflow before changes reach the protected public branch.
 
 ## Upstream
 

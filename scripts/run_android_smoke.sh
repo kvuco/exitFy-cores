@@ -39,13 +39,16 @@ ndk_home="$(exitfy_find_ndk)"
 toolchain="$(exitfy_ndk_toolchain "$ndk_home")"
 cc="$(exitfy_find_tool "$toolchain" "$compiler")"
 temporary="$(mktemp -d)"
-trap 'rm -rf "$temporary"; adb "${adb_args[@]}" shell rm -f /data/local/tmp/exitfy-core-smoke /data/local/tmp/exitfy-core.so /data/local/tmp/exitfy-smoke.json >/dev/null 2>&1 || true' EXIT
+trap 'rm -rf "$temporary"; adb "${adb_args[@]}" shell rm -f /data/local/tmp/exitfy-core-smoke /data/local/tmp/exitfy-core.so /data/local/tmp/exitfy-smoke.json /data/local/tmp/exitfy-corrupt.txt >/dev/null 2>&1 || true' EXIT
 
 "$cc" -std=c11 -Wall -Wextra -Werror -fPIE -pie \
   "$script_dir/android_smoke.c" -ldl -o "$temporary/exitfy-core-smoke"
 adb "${adb_args[@]}" push "$temporary/exitfy-core-smoke" /data/local/tmp/exitfy-core-smoke
 adb "${adb_args[@]}" push "$core" /data/local/tmp/exitfy-core.so
 adb "${adb_args[@]}" push "$repo_root/testdata/xray-smoke.json" /data/local/tmp/exitfy-smoke.json
+adb "${adb_args[@]}" push "$repo_root/testdata/xray-corrupt.txt" /data/local/tmp/exitfy-corrupt.txt
 adb "${adb_args[@]}" shell chmod 700 /data/local/tmp/exitfy-core-smoke
 adb "${adb_args[@]}" shell /data/local/tmp/exitfy-core-smoke \
   /data/local/tmp/exitfy-core.so /data/local/tmp/exitfy-smoke.json
+adb "${adb_args[@]}" shell /data/local/tmp/exitfy-core-smoke \
+  /data/local/tmp/exitfy-core.so /data/local/tmp/exitfy-corrupt.txt expect-start-error

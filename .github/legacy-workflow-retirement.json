@@ -1,0 +1,18 @@
+{
+  "defaultBranch": "main",
+  "host": "github.com",
+  "legacy": [
+    {
+      "id": 314449666,
+      "path": ".github/workflows/release-singbox.yml"
+    },
+    {
+      "id": 313793503,
+      "path": ".github/workflows/release-xray.yml"
+    }
+  ],
+  "repository": "kvuco/exitFy-cores",
+  "schema": 1,
+  "verifiedRunCount": 0,
+  "verifiedState": "disabled_manually"
+}
