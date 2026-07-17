@@ -58,7 +58,7 @@ def main() -> None:
         }
 
     manifest = {
-        "schema": 2,
+        "schema": 3,
         "coreApi": 2,
         "configContract": 1,
         "family": "xray",
@@ -72,7 +72,7 @@ def main() -> None:
             "repository": "kvuco/exitFy-cores",
             "commit": args.wrapper_commit,
         },
-        "minAndroidApi": 26,
+        "minAndroidApi": 29,
         "requiredExports": sorted(REQUIRED_EXPORTS),
         "assets": assets,
     }

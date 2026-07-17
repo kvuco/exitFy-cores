@@ -6,19 +6,15 @@ use the historical third-party `libvless.so` or its source.
 
 The current release workflow follows the latest stable XTLS/libXray release,
 builds the exact commit referenced by its tag, records both pins, runs adapter
-lifecycle tests, builds four Android
-ABIs at API 26, checks reproducibility, verifies ELF metadata and required
-exports, requires 16 KiB-compatible `PT_LOAD` alignment, performs a real
-start/stop on an Android API 26 x86_64 emulator, and
-publishes:
+lifecycle tests, builds only Android `arm64-v8a` at API 29, checks
+reproducibility, verifies ELF64/`EM_AARCH64` metadata and required exports,
+requires 16 KiB-compatible `PT_LOAD` alignment, and publishes:
 
 - libxray-arm64-v8a.so
-- libxray-armeabi-v7a.so
-- libxray-x86.so
-- libxray-x86_64.so
 - manifest.json
 
-`manifest.json` uses schema 2 with `coreApi: 2` and `configContract: 1`.
+`manifest.json` uses schema 3 with `coreApi: 2`, `configContract: 1`, and
+`minAndroidApi: 29`.
 ABI 2 release names use wrapper revision `w2` or newer, for example
 `xray-v26.7.11-w2`.
 
@@ -28,9 +24,6 @@ build. It enables only the features used by exitFy: QUIC-based outbounds and
 uTLS/Reality. It publishes:
 
 - `libexitfy-sb-arm64-v8a.so`
-- `libexitfy-sb-armeabi-v7a.so`
-- `libexitfy-sb-x86.so`
-- `libexitfy-sb-x86_64.so`
 - `manifest.json`
 - a reproducible corresponding-source bundle
 
@@ -63,8 +56,8 @@ offset to the visible public wrapper maximum. That reservation scheme prevents
 an invisible stale draft from capturing a later run's candidate tag; the epoch
 is explicitly bumped if a workflow counter is ever reset. The publisher still
 refuses to retarget any older draft's provenance. Every external Action is
-pinned to a full commit SHA; the API 26 emulator is launched by the repository's
-own shell runner.
+pinned to a full commit SHA. Android emulator/device smoke is intentionally not
+part of CI; it remains a downstream device-testing responsibility.
 
 The hardened publishers live at unique v2 workflow paths. A job-level guard
 rejects `workflow_dispatch` from anything except the default branch before a
@@ -146,10 +139,6 @@ For the separate SB module, use the Go version declared in `singbox/go.mod`:
       --expected-pin-sha256 "singbox/go.sum=$pin_sum_sha" \
       --upstream-version v1.13.14 \
       --output dist/exitfy-sb-v1.13.14-source.tar.gz
-
-With a matching Android device or emulator connected, run:
-
-    ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
 
 The public-tree audit examines the exact `HEAD` blobs, staged/index blobs,
 working and untracked files, and every commit in the unpushed range. It rejects

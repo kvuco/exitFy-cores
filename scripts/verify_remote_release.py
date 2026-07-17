@@ -11,12 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-ABIS = {
-    "arm64-v8a": (64, 183, "EM_AARCH64"),
-    "armeabi-v7a": (32, 40, "EM_ARM"),
-    "x86": (32, 3, "EM_386"),
-    "x86_64": (64, 62, "EM_X86_64"),
-}
+ABIS = {"arm64-v8a": (64, 183, "EM_AARCH64")}
 EXPORTS = {"StartCore", "StopCore"}
 TOP_LEVEL = {
     "schema", "coreApi", "configContract", "family", "releaseTag",
@@ -93,11 +88,11 @@ def verify_remote_release(
 
     manifest = _exact_keys(manifest, TOP_LEVEL, "manifest")
     if (
-        manifest.get("schema") != 2
+        manifest.get("schema") != 3
         or manifest.get("coreApi") != 2
         or manifest.get("configContract") != 1
         or manifest.get("family") != family
-        or manifest.get("minAndroidApi") != 26
+        or manifest.get("minAndroidApi") != 29
         or set(manifest.get("requiredExports") or []) != EXPORTS
         or len(manifest.get("requiredExports") or []) != len(EXPORTS)
     ):

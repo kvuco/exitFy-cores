@@ -2663,7 +2663,7 @@ def build_minimal_vendor(
         record(archive_relative, entry)
 
     packages: list[dict[str, object]] = []
-    for goarch, goarm in (("arm64", ""), ("arm", "7"), ("386", ""), ("amd64", "")):
+    for goarch, goarm in (("arm64", ""),):
         list_environment = environment.copy()
         list_environment.update(
             {"GOOS": "android", "GOARCH": goarch, "CGO_ENABLED": "1"}
@@ -2682,7 +2682,7 @@ def build_minimal_vendor(
     # `go mod vendor` treats almost every build tag as enabled and downloads
     # multi-gigabyte optional Cronet/TUN/Tailscale modules that exitFy does not
     # compile. Build the canonical minimal modules.txt from the explicit module
-    # graph and the exact four-ABI package list instead.
+    # graph and the exact arm64-v8a package list instead.
     edit_payload = bounded_command_output(
         [go_executable, "mod", "edit", "-json"],
         cwd=module,
@@ -2824,7 +2824,7 @@ def build_minimal_vendor(
     if full_vendor.exists():
         shutil.rmtree(full_vendor)
     minimal_vendor.rename(full_vendor)
-    for goarch, goarm in (("arm64", ""), ("arm", "7"), ("386", ""), ("amd64", "")):
+    for goarch, goarm in (("arm64", ""),):
         list_environment = environment.copy()
         list_environment.update(
             {"GOOS": "android", "GOARCH": goarch, "CGO_ENABLED": "1"}

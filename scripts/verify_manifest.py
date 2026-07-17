@@ -33,13 +33,13 @@ def main() -> None:
     verify(args.directory)
     value = json.loads(args.manifest.read_text(encoding="utf-8"))
     if set(value) != TOP_LEVEL_KEYS:
-        raise ValueError("manifest top-level fields do not match schema 2")
+        raise ValueError("manifest top-level fields do not match schema 3")
     if (
-        value.get("schema") != 2
+        value.get("schema") != 3
         or value.get("coreApi") != 2
         or value.get("configContract") != 1
         or value.get("family") != "xray"
-        or value.get("minAndroidApi") != 26
+        or value.get("minAndroidApi") != 29
         or set(value.get("requiredExports", [])) != REQUIRED_EXPORTS
     ):
         raise ValueError("unsupported manifest contract")
@@ -77,7 +77,7 @@ def main() -> None:
             or info.machine != machine
         ):
             raise ValueError(f"manifest asset mismatch for {abi}")
-    print(f"manifest schema 2 verified: {release_tag}")
+    print(f"manifest schema 3 verified: {release_tag}")
 
 
 if __name__ == "__main__":

@@ -196,7 +196,7 @@ class ReleaseWorkflowHardeningTest(unittest.TestCase):
                 )
 
     def test_new_draft_visibility_retry_is_bounded_and_fail_closed(self) -> None:
-        expected_counts = {"xray": 5, "sing_box": 6}
+        expected_counts = {"xray": 2, "sing_box": 3}
         for family, path in WORKFLOWS.items():
             with self.subTest(family=family):
                 workflow = path.read_text(encoding="utf-8")
@@ -216,6 +216,11 @@ class ReleaseWorkflowHardeningTest(unittest.TestCase):
                 self.assertEqual(
                     retry.count("--expected-asset"), expected_counts[family]
                 )
+                self.assertNotIn("emulator", workflow.lower())
+                self.assertNotIn("armeabi-v7a", workflow)
+                self.assertNotRegex(workflow, r"lib(?:xray|exitfy-sb)-x86(?:_64)?")
+                self.assertIn("Android API 29+", workflow)
+                self.assertIn("manifest schema 3", workflow)
 
                 # Readiness polling is additive: final exact-set, remote
                 # manifest and local digest verification still gate publish.

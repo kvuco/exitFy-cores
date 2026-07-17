@@ -68,14 +68,14 @@ def fixture(family: str) -> tuple[dict, dict, bytes]:
             "digest": f"sha256:{SOURCE_DIGEST}",
         })
     manifest = {
-        "schema": 2,
+        "schema": 3,
         "coreApi": 2,
         "configContract": 1,
         "family": family,
         "releaseTag": release_tag,
         "upstream": upstream,
         "wrapper": wrapper,
-        "minAndroidApi": 26,
+        "minAndroidApi": 29,
         "requiredExports": ["StartCore", "StopCore"],
         "assets": entries,
     }

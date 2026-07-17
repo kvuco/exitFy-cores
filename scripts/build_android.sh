@@ -41,7 +41,4 @@ build_one() {
   fi
 }
 
-build_one arm64-v8a arm64 aarch64-linux-android26-clang
-build_one armeabi-v7a arm armv7a-linux-androideabi26-clang 7
-build_one x86 386 i686-linux-android26-clang
-build_one x86_64 amd64 x86_64-linux-android26-clang
+build_one arm64-v8a arm64 aarch64-linux-android29-clang

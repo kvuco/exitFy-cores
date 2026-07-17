@@ -135,7 +135,7 @@ class CandidateHandoffTest(unittest.TestCase):
 
     def test_mutation_extra_file_and_provenance_mismatch_fail_closed(self) -> None:
         output, digest, values = self.create()
-        core = output / "libxray-x86.so"
+        core = output / "libxray-arm64-v8a.so"
         core.write_bytes(b"x" * core.stat().st_size)
         with self.assertRaisesRegex(ValueError, "bytes differ|ELF attestation"):
             candidate_handoff.verify_handoff(
@@ -168,7 +168,7 @@ class CandidateHandoffTest(unittest.TestCase):
             )
 
         output, digest, values = self.create()
-        core = output / "libxray-x86.so"
+        core = output / "libxray-arm64-v8a.so"
         victim = output.parent / "victim"
         victim.write_bytes(core.read_bytes())
         core.unlink()
@@ -179,7 +179,7 @@ class CandidateHandoffTest(unittest.TestCase):
             )
 
         output, digest, values = self.create()
-        core = output / "libxray-x86.so"
+        core = output / "libxray-arm64-v8a.so"
         victim = output.parent / "hardlink"
         os.link(core, victim)
         with self.assertRaisesRegex(ValueError, "single-link"):
@@ -221,7 +221,7 @@ class CandidateHandoffTest(unittest.TestCase):
 
     def test_core_attestation_must_match_the_exact_copied_bytes(self) -> None:
         artifacts, snapshot, attestation, values = self.fixture()
-        core = artifacts / "libxray-x86.so"
+        core = artifacts / "libxray-arm64-v8a.so"
         core.write_bytes(b"x" * core.stat().st_size)
         with self.assertRaisesRegex(ValueError, "ELF attestation"):
             candidate_handoff.create_handoff(

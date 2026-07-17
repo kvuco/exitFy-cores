@@ -123,7 +123,7 @@ class PublishedCandidateTest(unittest.TestCase):
                 }
             )
         manifest = {
-            "schema": 2,
+            "schema": 3,
             "coreApi": 2,
             "configContract": 1,
             "family": "xray",
@@ -137,7 +137,7 @@ class PublishedCandidateTest(unittest.TestCase):
                 "repository": "kvuco/exitFy-cores",
                 "commit": WRAPPER,
             },
-            "minAndroidApi": 26,
+            "minAndroidApi": 29,
             "requiredExports": ["StartCore", "StopCore"],
             "assets": entries,
         }
@@ -215,7 +215,7 @@ class PublishedCandidateTest(unittest.TestCase):
             verify_published_candidate.verify_published_candidate(**args)
 
         args, _ = self.fixture()
-        core = Path(args["candidate_directory"]) / "libxray-x86.so"
+        core = Path(args["candidate_directory"]) / "libxray-arm64-v8a.so"
         core.write_bytes(b"z" * core.stat().st_size)
         with self.assertRaises(ValueError):
             verify_published_candidate.verify_published_candidate(**args)

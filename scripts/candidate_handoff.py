@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-ABIS = ("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+ABIS = ("arm64-v8a",)
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 GO_VERSION = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
@@ -28,9 +28,6 @@ SNAPSHOT_DIR = "pin-snapshot"
 SNAPSHOT_FILES = ("go.mod", "go.sum", "snapshot.json")
 ABI_LAYOUT = {
     "arm64-v8a": (2, 183),
-    "armeabi-v7a": (1, 40),
-    "x86": (1, 3),
-    "x86_64": (2, 62),
 }
 REQUIRED_EXPORTS = ["StartCore", "StopCore"]
 MIN_ANDROID_PAGE_ALIGNMENT = 16 * 1024

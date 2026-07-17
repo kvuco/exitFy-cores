@@ -69,7 +69,7 @@ def main() -> None:
         }
 
     manifest = {
-        "schema": 2,
+        "schema": 3,
         "coreApi": 2,
         "configContract": 1,
         "family": "sing_box",
@@ -91,7 +91,7 @@ def main() -> None:
                 "sha256": sha256(args.source_bundle),
             },
         },
-        "minAndroidApi": 26,
+        "minAndroidApi": 29,
         "requiredExports": sorted(REQUIRED_EXPORTS),
         "assets": assets,
     }

@@ -240,7 +240,7 @@ jobs:
             --module-dir . --expected-head "$GITHUB_SHA" \
             --pin go.mod --pin go.sum
 
-      - name: Build and verify four ABIs twice
+      - name: Build and verify arm64-v8a twice
         if: steps.resolve.outputs.build_needed == 'true'
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
@@ -271,20 +271,6 @@ jobs:
           for artifact in dist/libxray-*.so; do
             cmp "$artifact" "dist-repro/${artifact#dist/}"
           done
-
-      - name: Enable KVM
-        if: steps.resolve.outputs.build_needed == 'true'
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Smoke-test ABI 2 on Android API 26
-        if: steps.resolve.outputs.build_needed == 'true'
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
-        run: ./scripts/with_api26_emulator.sh ./scripts/run_android_smoke.sh dist/libxray-x86_64.so
 
       - name: Verify final core bytes and freeze attestation
         id: core_attestation
@@ -569,7 +555,7 @@ jobs:
           candidate="$RUNNER_TEMP/candidate"
           wrapper_commit="${{ steps.wrapper.outputs.commit }}"
           release_title="Xray $UPSTREAM_TAG · core ABI 2"
-          release_notes="Independent exitFy build from XTLS/libXray $UPSTREAM_TAG ($UPSTREAM_COMMIT). Android API 26+, manifest schema 2, core API 2, config contract 1."
+          release_notes="Independent exitFy arm64-v8a build from XTLS/libXray $UPSTREAM_TAG ($UPSTREAM_COMMIT). Android API 29+, manifest schema 3, core API 2, config contract 1."
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG?per_page=100" \
             > "$RUNNER_TEMP/tag-before.json"
@@ -650,9 +636,6 @@ jobs:
             fi
             gh release upload "$RELEASE_TAG" \
               "$candidate/libxray-arm64-v8a.so" \
-              "$candidate/libxray-armeabi-v7a.so" \
-              "$candidate/libxray-x86.so" \
-              "$candidate/libxray-x86_64.so" \
               "$candidate/manifest.json" --clobber
             draft_ready=false
             for attempt in 1 2 3 4 5 6; do
@@ -662,9 +645,6 @@ jobs:
                   --releases "$RUNNER_TEMP/releases-after.json" \
                   --tag "$RELEASE_TAG" --commit "$wrapper_commit" \
                   --expected-asset libxray-arm64-v8a.so \
-                  --expected-asset libxray-armeabi-v7a.so \
-                  --expected-asset libxray-x86.so \
-                  --expected-asset libxray-x86_64.so \
                   --expected-asset manifest.json \
                   > "$RUNNER_TEMP/draft.pending.json"; then
                 mv "$RUNNER_TEMP/draft.pending.json" "$RUNNER_TEMP/draft.json"
@@ -687,7 +667,7 @@ jobs:
               exit 1
             fi
             draft_id="$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
-            expected="libxray-arm64-v8a.so,libxray-armeabi-v7a.so,libxray-x86.so,libxray-x86_64.so,manifest.json"
+            expected="libxray-arm64-v8a.so,manifest.json"
             actual="$(jq -r '[.assets[].name] | sort | join(",")' "$RUNNER_TEMP/draft.json")"
             if [[ "$actual" != "$expected" ]]; then
               echo "draft asset set is incomplete or unexpected" >&2

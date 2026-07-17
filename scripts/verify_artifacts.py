@@ -49,9 +49,6 @@ STV_PROTECTED = 3
 
 ABI_LAYOUT = {
     "arm64-v8a": (2, 183, "EM_AARCH64"),
-    "armeabi-v7a": (1, 40, "EM_ARM"),
-    "x86": (1, 3, "EM_386"),
-    "x86_64": (2, 62, "EM_X86_64"),
 }
 FAMILY_LAYOUT = {
     "xray": ("libxray", 1),

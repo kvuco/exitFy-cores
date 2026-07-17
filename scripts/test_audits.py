@@ -2545,27 +2545,6 @@ class AuditBoundaryTest(unittest.TestCase):
                     publish.index("Generate and verify final manifest"),
                 )
 
-    def test_android_smoke_requires_contract_checked_error_and_two_stops(self) -> None:
-        runner = (audit_public_tree.ROOT / "scripts/android_smoke.c").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("expect-start-error", runner)
-        self.assertIn("MAX_ERROR_BYTES 4096U", runner)
-        self.assertIn("if (error == NULL)", runner)
-        self.assertIn("stop_twice(stop)", runner)
-        self.assertGreaterEqual(runner.count("error = stop();"), 2)
-
-        xray = (audit_public_tree.ROOT / "scripts/run_android_smoke.sh").read_text(
-            encoding="utf-8"
-        )
-        singbox = (
-            audit_public_tree.ROOT / "scripts/run_singbox_android_smoke.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn("xray-corrupt.txt", xray)
-        self.assertIn("expect-start-error", xray)
-        self.assertIn("expect-start-error", singbox)
-        self.assertNotRegex(singbox, r"if\s+adb\b")
-
     def test_workflow_action_audit_rejects_unpinned_and_docker_references(self) -> None:
         failures: list[str] = []
         audit_public_tree._audit_bytes(

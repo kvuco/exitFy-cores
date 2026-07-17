@@ -600,7 +600,7 @@ class ArtifactMatrixAndAttestationTest(unittest.TestCase):
                     (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode(),
                 )
                 self.assertEqual(family, result["family"])
-                self.assertEqual(4, len(result["files"]))
+                self.assertEqual(1, len(result["files"]))
                 for record in result["files"]:
                     self.assertEqual(
                         hashlib.sha256((root / record["path"]).read_bytes()).hexdigest(),
@@ -610,7 +610,7 @@ class ArtifactMatrixAndAttestationTest(unittest.TestCase):
     def test_matrix_rejects_wrong_machine_and_extra_export(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.populate(root, "xray")
-        (root / "libxray-x86.so").write_bytes(synthetic_elf(1, 62))
+        (root / "libxray-arm64-v8a.so").write_bytes(synthetic_elf(2, 62))
         with self.assertRaisesRegex(ValueError, "wrong ELF class/machine"):
             verify_artifacts.verify(root)
 
