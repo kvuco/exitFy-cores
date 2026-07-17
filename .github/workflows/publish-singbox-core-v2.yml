@@ -52,7 +52,8 @@ jobs:
       GOTOOLCHAIN: local
       FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
       PYTHONDONTWRITEBYTECODE: "1"
-      GOPROXY: direct
+      GOPROXY: https://proxy.golang.org
+      GOSUMDB: sum.golang.org
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -185,7 +186,7 @@ jobs:
         if: steps.resolve.outputs.build_needed == 'true'
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
-      - name: Isolate direct Go module downloads
+      - name: Isolate verified Go module downloads
         if: steps.resolve.outputs.build_needed == 'true'
         run: |
           mkdir -m 700 "$RUNNER_TEMP/exitfy-go-mod-cache"

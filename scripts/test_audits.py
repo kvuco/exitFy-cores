@@ -2493,8 +2493,9 @@ class AuditBoundaryTest(unittest.TestCase):
                 build_header = build.split("    steps:\n", 1)[0]
                 self.assertNotIn("GH_TOKEN:", build_header)
                 self.assertEqual(build.count("GH_TOKEN:"), 2)
-                self.assertIn("GOPROXY: direct", build_header)
-                self.assertIn("Isolate direct Go module downloads", build)
+                self.assertIn("GOPROXY: https://proxy.golang.org", build_header)
+                self.assertIn("GOSUMDB: sum.golang.org", build_header)
+                self.assertIn("Isolate verified Go module downloads", build)
                 self.assertIn(
                     'GOMODCACHE=$RUNNER_TEMP/exitfy-go-mod-cache', build
                 )
